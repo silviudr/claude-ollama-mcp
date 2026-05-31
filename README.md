@@ -18,15 +18,22 @@ under-delegating.
 
 ```
 claude-ollama-mcp/
-├── ollama_mcp.py     # the MCP server (stdio transport, FastMCP)
-├── requirements.txt  # mcp[cli], httpx
-├── examples/         # toy project built entirely via local delegation
-│   └── textkit/      # pure-function text utilities (see Example project)
+├── ollama_mcp/           # Python package
+│   ├── __init__.py       # re-exports mcp server instance
+│   ├── __main__.py       # entry point: python -m ollama_mcp
+│   ├── config.py         # env-driven settings (URL, model, log path)
+│   ├── client.py         # Ollama HTTP client with error handling
+│   ├── errors.py         # structured error types
+│   ├── server.py         # FastMCP instance
+│   ├── telemetry.py      # JSON-lines logging, observed() decorator
+│   └── tools.py          # MCP tool definitions
+├── pyproject.toml        # packaging (pip installable)
+├── requirements.txt      # mcp[cli], httpx
+├── examples/             # toy project built entirely via local delegation
+│   └── textkit/          # pure-function text utilities (see Example project)
 ├── .gitignore
 └── README.md
 ```
-
-No package, no tests yet — single-file server by design.
 
 ## Tools exposed
 
@@ -72,6 +79,11 @@ requirement.
 git clone <this-repo>
 cd claude-ollama-mcp
 python3 -m venv .venv
+
+# Option A: pip install (editable)
+.venv/bin/pip install -e .
+
+# Option B: from requirements
 .venv/bin/pip install -r requirements.txt
 
 # confirm the exact tag of your local model
@@ -86,11 +98,19 @@ User scope (available in every project on this machine):
 claude mcp add -s user ollama-local \
   --env OLLAMA_MODEL=gemma4-32k \
   -- $(pwd)/.venv/bin/python \
-     $(pwd)/ollama_mcp.py
+     -m ollama_mcp
 ```
 
 Replace `gemma4-32k` with whatever `ollama list` shows for your model.
 Use `-s project` instead if you only want one repo to see the server.
+
+If installed via `pip install` (non-editable), the console script also works:
+
+```bash
+claude mcp add -s user ollama-local \
+  --env OLLAMA_MODEL=gemma4-32k \
+  -- $(pwd)/.venv/bin/ollama-mcp
+```
 
 Verify:
 
@@ -110,6 +130,21 @@ claude mcp list
 
 Set these via `--env` at `claude mcp add`, by editing `~/.claude.json`, or
 in `.mcp.json` if registered per-project.
+
+## Error handling
+
+The server returns actionable error messages instead of raw tracebacks:
+
+| Failure                 | Error raised              | Message includes                          |
+| ----------------------- | ------------------------- | ----------------------------------------- |
+| Ollama not running      | `OllamaConnectionError`  | URL tried + `ollama serve` hint           |
+| Model tag doesn't exist | `OllamaModelNotFound`    | Model name + `ollama pull` hint           |
+| Request too slow        | `OllamaTimeout`          | Timeout duration + suggested causes       |
+| HTTP 4xx/5xx            | `OllamaServerError`      | Status code + response excerpt            |
+| Garbled JSON            | `OllamaMalformedResponse`| What was expected vs. what arrived        |
+
+All errors are subclasses of `OllamaError` and are logged to the telemetry
+file before propagating to the MCP client.
 
 ## Observability
 
@@ -191,26 +226,16 @@ To try it yourself, start Claude Code inside the example directory and say
 claude --mcp-debug
 
 # Or manually start the server to see import / startup errors directly:
-.venv/bin/python ollama_mcp.py
+.venv/bin/python -m ollama_mcp
 # (it will block on stdin waiting for MCP traffic — Ctrl-C to exit;
 #  you only need it to *not* crash to know imports are fine)
 ```
 
 ## Adding a tool
 
-1. Add an `async def local_xxx(...)` function calling `_gen(...)`.
+1. Add an `async def local_xxx(...)` function in `ollama_mcp/tools.py`
+   calling `generate(...)`.
 2. Decorate with `@mcp.tool()` then `@observed("local_xxx")`.
 3. Write a docstring that says clearly **when to use** and **when NOT to
    use** the tool — that's the only thing Claude sees.
 4. Restart Claude Code (or `/mcp reconnect`) so the tool list refreshes.
-
-## Status / next ideas
-
-- No automated tests yet. A small smoke script that calls `_gen` once
-  against the configured model would catch the most common breakage
-  (Ollama down, wrong tag).
-- If routing rate is too low, try splitting `local_draft_boilerplate` into
-  more specific tools (e.g. `local_draft_pytest`, `local_draft_dockerfile`)
-  — narrower descriptions get picked more reliably than broad ones.
-- If logs grow large, rotate via `logging.handlers.RotatingFileHandler` or
-  ship the JSONL into DuckDB / Loki.
