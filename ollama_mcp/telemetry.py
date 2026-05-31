@@ -1,4 +1,4 @@
-"""JSON-lines logging and the observed() tool decorator."""
+"""JSON-lines logging, SQLite storage, and the observed() tool decorator."""
 
 import functools
 import json
@@ -6,6 +6,7 @@ import logging
 import time
 
 from .config import LOG_PATH
+from .storage import log_call
 
 logger = logging.getLogger("ollama_mcp")
 logger.setLevel(logging.INFO)
@@ -18,6 +19,7 @@ logger.propagate = False
 def record(event: dict) -> None:
     event["ts"] = time.time()
     logger.info(json.dumps(event))
+    log_call(event)
 
 
 def observed(tool_name: str):

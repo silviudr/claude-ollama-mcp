@@ -2,6 +2,7 @@
 
 from .client import generate
 from .server import mcp
+from .storage import get_stats
 from .telemetry import observed
 
 
@@ -162,3 +163,51 @@ async def local_generate_tests(source: str, context: str = "") -> str:
             f"{context_instruction}"
         ),
     )
+
+
+@mcp.tool()
+async def local_usage_stats() -> str:
+    """Return usage statistics for all local Ollama tool calls: total calls,
+    success rate, token counts, per-tool breakdown, and estimated cloud cost
+    avoided.
+
+    Use when:
+      - User asks how much local delegation has saved
+      - User wants to see Ollama usage or performance stats
+      - Reporting on local vs. cloud trade-offs"""
+    stats = get_stats()
+
+    total = stats["total_calls"]
+    if total == 0:
+        return "No local tool calls recorded yet."
+
+    ok = stats["successful"]
+    rate = ok / total * 100
+    in_tok = stats["total_prompt_tokens"]
+    out_tok = stats["total_output_tokens"]
+    costs = stats["estimated_cost_avoided"]
+
+    lines = [
+        f"Local calls:   {total}",
+        f"Successful:    {ok} ({rate:.1f}%)",
+        f"Failed:        {stats['failed']}",
+        f"Avg latency:   {stats['avg_total_ms']}ms",
+        "",
+        f"Prompt tokens:  {in_tok:,}",
+        f"Output tokens:  {out_tok:,}",
+        "",
+        "Estimated cloud cost avoided:",
+        f"  Opus:   ${costs['opus']:.4f}",
+        f"  Sonnet: ${costs['sonnet']:.4f}",
+    ]
+
+    if stats["per_tool"]:
+        lines += ["", "Per tool:"]
+        for t in stats["per_tool"]:
+            lines.append(
+                f"  {t['tool']}: {t['calls']} calls, "
+                f"{t['prompt_tokens']:,}+{t['output_tokens']:,} tok, "
+                f"avg {t['avg_ms']}ms"
+            )
+
+    return "\n".join(lines)
