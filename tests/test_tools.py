@@ -4,6 +4,7 @@ import httpx
 import pytest
 import respx
 
+from ollama_mcp import storage
 from ollama_mcp.config import OLLAMA_URL
 from ollama_mcp.tools import (
     local_commit_message,
@@ -12,6 +13,7 @@ from ollama_mcp.tools import (
     local_implement_small,
     local_review_diff,
     local_summarize,
+    local_usage_stats,
 )
 
 API_URL = f"{OLLAMA_URL}/api/generate"
@@ -104,3 +106,40 @@ async def test_local_generate_tests_empty_context():
 
     payload = json.loads(route.calls[0].request.read())
     assert "Additional context" not in payload["system"]
+
+
+@pytest.fixture(autouse=True)
+def _use_tmp_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "test.db")
+    if hasattr(storage._local, "conn"):
+        del storage._local.conn
+
+
+async def test_local_usage_stats_empty():
+    result = await local_usage_stats()
+    assert result == "No local tool calls recorded yet."
+
+
+async def test_local_usage_stats_with_data():
+    import time
+    storage.log_call({
+        "ts": time.time(), "tool": "local_summarize", "ok": True,
+        "model": "gemma4-32k", "input_chars": 100, "output_chars": 50,
+        "prompt_tokens": 500, "output_tokens": 200,
+        "total_ms": 1500, "wall_ms": 1400, "eval_ms": 1200,
+    })
+    storage.log_call({
+        "ts": time.time(), "tool": "local_commit_message", "ok": True,
+        "model": "gemma4-32k", "input_chars": 80, "output_chars": 30,
+        "prompt_tokens": 300, "output_tokens": 100,
+        "total_ms": 800, "wall_ms": 700, "eval_ms": 600,
+    })
+    result = await local_usage_stats()
+    assert "Local calls:   2" in result
+    assert "Successful:    2" in result
+    assert "Prompt tokens:  800" in result
+    assert "Output tokens:  300" in result
+    assert "Opus:" in result
+    assert "Sonnet:" in result
+    assert "local_summarize" in result
+    assert "local_commit_message" in result

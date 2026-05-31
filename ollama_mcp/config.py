@@ -8,4 +8,8 @@ MODEL = os.environ.get("OLLAMA_MODEL", "gemma4-32k")
 LOG_PATH = Path(
     os.environ.get("OLLAMA_MCP_LOG", str(Path.home() / ".cache" / "ollama_mcp.jsonl"))
 )
+DB_PATH = Path(
+    os.environ.get("OLLAMA_MCP_DB", str(Path.home() / ".cache" / "ollama_mcp.db"))
+)
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
