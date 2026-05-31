@@ -75,3 +75,90 @@ async def local_commit_message(diff: str) -> str:
         diff,
         system="Write one concise conventional-commit subject. No body unless necessary.",
     )
+
+
+@mcp.tool()
+@observed("local_review_diff")
+async def local_review_diff(diff: str, focus: str = "") -> str:
+    """Review a code diff or file content for issues. Returns a structured
+    list of findings covering: bugs, security concerns, risky assumptions,
+    missing tests, and complexity issues.
+
+    Use when:
+      - User asks to review a diff, patch, or file for quality
+      - A quick local sanity check before committing or opening a PR
+      - Screening code that does not require deep repo context
+
+    Do NOT use when:
+      - The review requires understanding cross-file dependencies
+      - Correctness depends on project conventions, configs, or schemas
+      - The diff is very large (>500 lines) — split it first
+
+    Args:
+        diff: The unified diff or file content to review.
+        focus: Optional comma-separated focus areas to prioritize, e.g.
+               "security,performance". When empty, all categories are
+               covered equally."""
+    focus_instruction = ""
+    if focus.strip():
+        focus_instruction = f" Focus especially on: {focus.strip()}."
+
+    return await generate(
+        diff,
+        system=(
+            "You are a code reviewer. Analyze the provided diff or code and "
+            "return a structured review.\n\n"
+            "For each finding, output a line in this format:\n"
+            "[SEVERITY] CATEGORY: description (file:line if available)\n\n"
+            "Severities: HIGH, MEDIUM, LOW\n"
+            "Categories: BUG, SECURITY, PERFORMANCE, COMPLEXITY, STYLE, "
+            "MISSING_TEST, RISKY_ASSUMPTION\n\n"
+            "End with a one-line summary: 'Summary: N findings "
+            "(X high, Y medium, Z low)'\n"
+            "If the code looks clean, say 'No issues found.'"
+            f"{focus_instruction}"
+        ),
+    )
+
+
+@mcp.tool()
+@observed("local_generate_tests")
+async def local_generate_tests(source: str, context: str = "") -> str:
+    """Generate pytest tests for a Python file. Identifies public functions
+    and classes, then produces test cases covering normal inputs, edge cases,
+    and error conditions. Output is executable Python test code.
+
+    Use when:
+      - User asks to generate tests for a standalone module or utility
+      - The source file has clear public interfaces (functions, classes)
+      - The code is self-contained enough to test without complex fixtures
+
+    Do NOT use when:
+      - The code under test has deep dependencies on other project modules
+      - Tests need database fixtures, network mocks, or complex setup
+      - The file is mostly imports/glue with no testable logic
+
+    Args:
+        source: The full Python source code to generate tests for.
+        context: Optional description of what the module does or any
+                 constraints the tests should respect."""
+    context_instruction = ""
+    if context.strip():
+        context_instruction = f"\n\nAdditional context: {context.strip()}"
+
+    return await generate(
+        source,
+        system=(
+            "You are a test engineer. Given the Python source code, generate "
+            "a complete pytest test file.\n\n"
+            "Rules:\n"
+            "- Import the functions/classes being tested at the top\n"
+            "- Test each public function and class method\n"
+            "- Include tests for: normal inputs, edge cases (empty, None, "
+            "boundary values), and expected errors\n"
+            "- Use descriptive test names: test_<function>_<scenario>\n"
+            "- Use pytest.raises for expected exceptions\n"
+            "- No markdown fences, no explanation — output only valid Python"
+            f"{context_instruction}"
+        ),
+    )
