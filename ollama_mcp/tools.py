@@ -1,6 +1,7 @@
 """MCP tool definitions."""
 
-from .client import generate
+from .client import generate, generate_json
+from .schemas import ReviewResult
 from .server import mcp
 from .storage import get_stats
 from .telemetry import observed
@@ -104,22 +105,20 @@ async def local_review_diff(diff: str, focus: str = "") -> str:
     if focus.strip():
         focus_instruction = f" Focus especially on: {focus.strip()}."
 
-    return await generate(
-        diff,
-        system=(
-            "You are a code reviewer. Analyze the provided diff or code and "
-            "return a structured review.\n\n"
-            "For each finding, output a line in this format:\n"
-            "[SEVERITY] CATEGORY: description (file:line if available)\n\n"
-            "Severities: HIGH, MEDIUM, LOW\n"
-            "Categories: BUG, SECURITY, PERFORMANCE, COMPLEXITY, STYLE, "
-            "MISSING_TEST, RISKY_ASSUMPTION\n\n"
-            "End with a one-line summary: 'Summary: N findings "
-            "(X high, Y medium, Z low)'\n"
-            "If the code looks clean, say 'No issues found.'"
-            f"{focus_instruction}"
-        ),
+    system = (
+        "You are a code reviewer. Analyze the provided diff or code.\n"
+        "Return your review as JSON with a 'findings' array and a 'summary' string.\n"
+        "Each finding has: severity (HIGH/MEDIUM/LOW), category "
+        "(BUG/SECURITY/PERFORMANCE/COMPLEXITY/STYLE/MISSING_TEST/RISKY_ASSUMPTION), "
+        "message, and optionally file and line.\n"
+        "If the code looks clean, return an empty findings array."
+        f"{focus_instruction}"
     )
+
+    parsed, raw, meta = await generate_json(diff, ReviewResult, system=system)
+    if parsed is not None:
+        return parsed.format(), meta
+    return raw, meta
 
 
 @mcp.tool()
