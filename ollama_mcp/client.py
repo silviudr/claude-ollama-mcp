@@ -1,8 +1,12 @@
 """Ollama HTTP client."""
 
+import json
+import re
 import time
+from typing import TypeVar
 
 import httpx
+from pydantic import BaseModel, ValidationError
 
 from .config import MODEL, OLLAMA_URL
 from .errors import (
@@ -12,6 +16,8 @@ from .errors import (
     OllamaServerError,
     OllamaTimeout,
 )
+
+T = TypeVar("T", bound=BaseModel)
 
 TIMEOUT_S = 180
 
@@ -55,3 +61,40 @@ async def generate(prompt: str, system: str | None = None) -> tuple[str, dict]:
         "eval_ms": (data.get("eval_duration") or 0) // 1_000_000,
         "model": MODEL,
     }
+
+
+_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
+
+
+def _strip_fences(text: str) -> str:
+    m = _FENCE_RE.search(text)
+    return m.group(1).strip() if m else text.strip()
+
+
+async def generate_json(
+    prompt: str,
+    schema: type[T],
+    system: str | None = None,
+) -> tuple[T | None, str, dict]:
+    """Call generate() requesting JSON, validate against a Pydantic model.
+
+    Returns (parsed_model, raw_text, meta).  If the model's output fails
+    JSON parsing or schema validation, parsed_model is None and raw_text
+    contains the original response so callers can fall back gracefully.
+    """
+    schema_hint = json.dumps(schema.model_json_schema(), indent=2)
+    json_instruction = (
+        "\n\nYou MUST respond with valid JSON matching this schema — "
+        "no markdown fences, no prose before or after:\n"
+        f"{schema_hint}"
+    )
+    full_system = (system or "") + json_instruction
+
+    raw, meta = await generate(prompt, system=full_system)
+
+    cleaned = _strip_fences(raw)
+    try:
+        parsed = schema.model_validate_json(cleaned)
+        return parsed, raw, meta
+    except (json.JSONDecodeError, ValidationError):
+        return None, raw, meta

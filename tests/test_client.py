@@ -1,8 +1,10 @@
+import json
+
 import httpx
 import pytest
 import respx
 
-from ollama_mcp.client import generate
+from ollama_mcp.client import generate, generate_json
 from ollama_mcp.config import MODEL, OLLAMA_URL
 from ollama_mcp.errors import (
     OllamaConnectionError,
@@ -11,6 +13,7 @@ from ollama_mcp.errors import (
     OllamaServerError,
     OllamaTimeout,
 )
+from ollama_mcp.schemas import ReviewResult
 
 API_URL = f"{OLLAMA_URL}/api/generate"
 
@@ -116,3 +119,83 @@ async def test_generic_error_in_body():
 
     with pytest.raises(OllamaServerError, match="GPU out of memory"):
         await generate("hello")
+
+
+# --- generate_json tests ---
+
+
+@respx.mock
+async def test_generate_json_valid():
+    valid_json = json.dumps({
+        "findings": [
+            {"severity": "HIGH", "category": "BUG", "message": "null deref",
+             "file": "app.py", "line": 42}
+        ],
+        "summary": "1 finding (1 high)",
+    })
+    respx.post(API_URL).mock(return_value=httpx.Response(200, json={
+        "response": valid_json,
+    }))
+
+    parsed, raw, meta = await generate_json("review this", ReviewResult)
+
+    assert parsed is not None
+    assert len(parsed.findings) == 1
+    assert parsed.findings[0].severity == "HIGH"
+    assert parsed.summary == "1 finding (1 high)"
+
+
+@respx.mock
+async def test_generate_json_with_markdown_fences():
+    valid_json = json.dumps({
+        "findings": [],
+        "summary": "No issues found.",
+    })
+    fenced = f"```json\n{valid_json}\n```"
+    respx.post(API_URL).mock(return_value=httpx.Response(200, json={
+        "response": fenced,
+    }))
+
+    parsed, raw, meta = await generate_json("review this", ReviewResult)
+
+    assert parsed is not None
+    assert parsed.findings == []
+
+
+@respx.mock
+async def test_generate_json_invalid_json_returns_none():
+    respx.post(API_URL).mock(return_value=httpx.Response(200, json={
+        "response": "This is not JSON at all, just plain text review.",
+    }))
+
+    parsed, raw, meta = await generate_json("review this", ReviewResult)
+
+    assert parsed is None
+    assert "not JSON" in raw
+
+
+@respx.mock
+async def test_generate_json_wrong_schema_returns_none():
+    wrong_shape = json.dumps({"wrong_field": "data"})
+    respx.post(API_URL).mock(return_value=httpx.Response(200, json={
+        "response": wrong_shape,
+    }))
+
+    parsed, raw, meta = await generate_json("review this", ReviewResult)
+
+    assert parsed is None
+    assert raw == wrong_shape
+
+
+@respx.mock
+async def test_generate_json_includes_schema_in_system():
+    route = respx.post(API_URL).mock(return_value=httpx.Response(200, json={
+        "response": json.dumps({"findings": [], "summary": "clean"}),
+    }))
+
+    await generate_json("test", ReviewResult, system="Be strict.")
+
+    payload = json.loads(route.calls[0].request.read())
+    assert "Be strict." in payload["system"]
+    assert "JSON" in payload["system"]
+    assert "schema" in payload["system"].lower()

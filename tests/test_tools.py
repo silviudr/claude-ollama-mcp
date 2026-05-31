@@ -54,17 +54,31 @@ async def test_local_commit_message():
 
 
 @respx.mock
-async def test_local_review_diff_basic():
-    findings = "[HIGH] BUG: off-by-one error (foo.py:10)\nSummary: 1 findings (1 high, 0 medium, 0 low)"
-    _mock_ollama(findings)
-    result = await local_review_diff("--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-x[len(x)]\n+x[len(x)-1]")
-    assert "BUG" in result
-    assert "Summary" in result
+async def test_local_review_diff_structured():
+    review_json = json.dumps({
+        "findings": [
+            {"severity": "HIGH", "category": "BUG",
+             "message": "off-by-one error", "file": "foo.py", "line": 10}
+        ],
+        "summary": "1 finding (1 high, 0 medium, 0 low)",
+    })
+    _mock_ollama(review_json)
+    result = await local_review_diff("--- a/foo.py\n+++ b/foo.py")
+    assert "[HIGH] BUG: off-by-one error (foo.py:10)" in result
+    assert "1 finding" in result
+
+
+@respx.mock
+async def test_local_review_diff_fallback_on_invalid_json():
+    _mock_ollama("Some plain text review with no JSON structure.")
+    result = await local_review_diff("some diff")
+    assert "plain text review" in result
 
 
 @respx.mock
 async def test_local_review_diff_with_focus():
-    route = _mock_ollama("No issues found.")
+    review_json = json.dumps({"findings": [], "summary": "clean"})
+    route = _mock_ollama(review_json)
     await local_review_diff("some diff", focus="security,performance")
 
     payload = json.loads(route.calls[0].request.read())
@@ -74,7 +88,8 @@ async def test_local_review_diff_with_focus():
 
 @respx.mock
 async def test_local_review_diff_empty_focus():
-    route = _mock_ollama("No issues found.")
+    review_json = json.dumps({"findings": [], "summary": "clean"})
+    route = _mock_ollama(review_json)
     await local_review_diff("some diff", focus="")
 
     payload = json.loads(route.calls[0].request.read())
