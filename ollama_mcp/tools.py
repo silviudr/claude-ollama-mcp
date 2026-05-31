@@ -1,6 +1,7 @@
 """MCP tool definitions."""
 
 from .client import generate, generate_json
+from .privacy import privacy_guard
 from .schemas import ReviewResult
 from .server import mcp
 from .storage import get_stats
@@ -9,6 +10,7 @@ from .telemetry import observed
 
 @mcp.tool()
 @observed("local_summarize")
+@privacy_guard
 async def local_summarize(text: str) -> str:
     """Summarize a long file, log, or document using a local model.
     Prefer this over reading the whole thing yourself when only the gist is
@@ -18,6 +20,7 @@ async def local_summarize(text: str) -> str:
 
 @mcp.tool()
 @observed("local_draft_boilerplate")
+@privacy_guard
 async def local_draft_boilerplate(spec: str) -> str:
     """Generate mechanical, repetitive code where the structure is fully
     dictated by the spec. Output is code only — no prose, no markdown fences.
@@ -42,6 +45,7 @@ async def local_draft_boilerplate(spec: str) -> str:
 
 @mcp.tool()
 @observed("local_implement_small")
+@privacy_guard
 async def local_implement_small(spec: str) -> str:
     """Implement a single self-contained function or short script (≤ ~50 lines)
     from a clear, specified interface. Output is code only.
@@ -70,6 +74,7 @@ async def local_implement_small(spec: str) -> str:
 
 @mcp.tool()
 @observed("local_commit_message")
+@privacy_guard
 async def local_commit_message(diff: str) -> str:
     """Draft a single conventional-commit subject line from a unified diff.
     Use after staging changes when a quick message is wanted."""
@@ -81,6 +86,7 @@ async def local_commit_message(diff: str) -> str:
 
 @mcp.tool()
 @observed("local_review_diff")
+@privacy_guard
 async def local_review_diff(diff: str, focus: str = "") -> str:
     """Review a code diff or file content for issues. Returns a structured
     list of findings covering: bugs, security concerns, risky assumptions,
@@ -123,6 +129,7 @@ async def local_review_diff(diff: str, focus: str = "") -> str:
 
 @mcp.tool()
 @observed("local_generate_tests")
+@privacy_guard
 async def local_generate_tests(source: str, context: str = "") -> str:
     """Generate pytest tests for a Python file. Identifies public functions
     and classes, then produces test cases covering normal inputs, edge cases,

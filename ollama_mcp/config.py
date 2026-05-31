@@ -11,5 +11,11 @@ LOG_PATH = Path(
 DB_PATH = Path(
     os.environ.get("OLLAMA_MCP_DB", str(Path.home() / ".cache" / "ollama_mcp.db"))
 )
+PRIVACY_CONFIG_PATH = Path(
+    os.environ.get(
+        "OLLAMA_MCP_PRIVACY",
+        str(Path.home() / ".config" / "ollama_mcp" / "privacy.json"),
+    )
+)
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
