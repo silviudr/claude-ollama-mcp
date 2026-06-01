@@ -17,5 +17,11 @@ PRIVACY_CONFIG_PATH = Path(
         str(Path.home() / ".config" / "ollama_mcp" / "privacy.json"),
     )
 )
+ROUTES_CONFIG_PATH = Path(
+    os.environ.get(
+        "OLLAMA_MCP_ROUTES",
+        str(Path.home() / ".config" / "ollama_mcp" / "routes.json"),
+    )
+)
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)

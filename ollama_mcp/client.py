@@ -93,6 +93,7 @@ async def generate_json(
     prompt: str,
     schema: type[T],
     system: str | None = None,
+    model: str | None = None,
 ) -> tuple[T | None, str, dict]:
     """Call generate() requesting JSON, validate against a Pydantic model.
 
@@ -108,7 +109,7 @@ async def generate_json(
     )
     full_system = (system or "") + json_instruction
 
-    raw, meta = await generate(prompt, system=full_system)
+    raw, meta = await generate(prompt, system=full_system, model=model)
 
     cleaned = _strip_fences(raw)
     try:

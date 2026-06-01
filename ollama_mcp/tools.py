@@ -3,7 +3,8 @@
 from .benchmark import format_results, run_benchmark
 from .client import generate, generate_json, list_models
 from .privacy import privacy_guard
-from .schemas import ReviewResult
+from .router import get_routes_info, resolve_model
+from .schemas import ReviewResult, TaskClassification
 from .server import mcp
 from .storage import get_stats
 from .telemetry import observed
@@ -16,7 +17,10 @@ async def local_summarize(text: str) -> str:
     """Summarize a long file, log, or document using a local model.
     Prefer this over reading the whole thing yourself when only the gist is
     needed. Do NOT use for content where exact wording matters."""
-    return await generate(text, system="Summarize concisely. No preamble.")
+    return await generate(
+        text, system="Summarize concisely. No preamble.",
+        model=resolve_model("local_summarize"),
+    )
 
 
 @mcp.tool()
@@ -41,6 +45,7 @@ async def local_draft_boilerplate(spec: str) -> str:
     return await generate(
         spec,
         system="Output code only. No explanation, no markdown fences.",
+        model=resolve_model("local_draft_boilerplate"),
     )
 
 
@@ -70,6 +75,7 @@ async def local_implement_small(spec: str) -> str:
             "You are implementing a single small, self-contained piece of code. "
             "Output only the code. No explanation, no markdown fences, no preamble."
         ),
+        model=resolve_model("local_implement_small"),
     )
 
 
@@ -82,6 +88,7 @@ async def local_commit_message(diff: str) -> str:
     return await generate(
         diff,
         system="Write one concise conventional-commit subject. No body unless necessary.",
+        model=resolve_model("local_commit_message"),
     )
 
 
@@ -122,7 +129,10 @@ async def local_review_diff(diff: str, focus: str = "") -> str:
         f"{focus_instruction}"
     )
 
-    parsed, raw, meta = await generate_json(diff, ReviewResult, system=system)
+    parsed, raw, meta = await generate_json(
+        diff, ReviewResult, system=system,
+        model=resolve_model("local_review_diff"),
+    )
     if parsed is not None:
         return parsed.format(), meta
     return raw, meta
@@ -169,6 +179,7 @@ async def local_generate_tests(source: str, context: str = "") -> str:
             "- No markdown fences, no explanation — output only valid Python"
             f"{context_instruction}"
         ),
+        model=resolve_model("local_generate_tests"),
     )
 
 
@@ -260,3 +271,58 @@ async def local_list_models() -> str:
     if not models:
         return "No models found. Install one with: ollama pull <model>"
     return "Available local models:\n" + "\n".join(f"  - {m}" for m in models)
+
+
+@mcp.tool()
+async def local_show_routes() -> str:
+    """Show the current model routing configuration — which model is
+    assigned to which tool.
+
+    Use when:
+      - User asks which model handles which task
+      - Debugging why a tool is using a particular model
+      - Reviewing routing config before changing it"""
+    return get_routes_info()
+
+
+@mcp.tool()
+@observed("local_classify_task")
+async def local_classify_task(prompt: str) -> str:
+    """Classify a task and recommend which local tool and model to use.
+    Returns the task type, risk level, recommended tool, recommended model,
+    and whether the task is suitable for local processing.
+
+    Use when:
+      - Deciding which local tool to call for a given user request
+      - Evaluating whether a task should be handled locally or by cloud
+      - User asks "which model should handle this?"
+
+    Args:
+        prompt: The task description or user request to classify."""
+    available_tools = (
+        "local_summarize, local_draft_boilerplate, local_implement_small, "
+        "local_commit_message, local_review_diff, local_generate_tests"
+    )
+
+    parsed, raw, meta = await generate_json(
+        prompt,
+        TaskClassification,
+        system=(
+            "You are a task classifier for a local AI routing system.\n"
+            "Given a task description, classify it and recommend the best "
+            "local tool and model.\n\n"
+            f"Available tools: {available_tools}\n\n"
+            "Guidelines:\n"
+            "- task_type: summarize, code, review, test, explain, boilerplate, or other\n"
+            "- risk: low (simple/mechanical), medium (needs care), high (complex/critical)\n"
+            "- should_use_local: false if the task needs cross-file reasoning, "
+            "repo context, or high accuracy on critical code\n"
+            "- recommended_model: suggest 'default' unless the task clearly "
+            "benefits from a specialized model (e.g. code models for code tasks)"
+        ),
+        model=resolve_model("local_classify_task"),
+    )
+
+    if parsed is not None:
+        return parsed.format(), meta
+    return raw, meta

@@ -8,12 +8,14 @@ from ollama_mcp import storage
 from ollama_mcp.config import OLLAMA_URL
 from ollama_mcp.tools import (
     local_benchmark,
+    local_classify_task,
     local_commit_message,
     local_draft_boilerplate,
     local_generate_tests,
     local_implement_small,
     local_list_models,
     local_review_diff,
+    local_show_routes,
     local_summarize,
     local_usage_stats,
 )
@@ -212,3 +214,46 @@ async def test_local_list_models_empty():
     result = await local_list_models()
     assert "No models found" in result
     assert "ollama pull" in result
+
+
+async def test_local_show_routes(monkeypatch):
+    import ollama_mcp.router as router
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", router.ROUTES_CONFIG_PATH.parent / "nonexistent")
+    result = await local_show_routes()
+    assert "No routing config" in result
+
+
+async def test_local_show_routes_with_config(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps({
+        "default": "gemma4-32k",
+        "routes": {"local_review_diff": "deepseek-coder"},
+    }))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+    result = await local_show_routes()
+    assert "deepseek-coder" in result
+    assert "gemma4-32k" in result
+
+
+@respx.mock
+async def test_local_classify_task_structured():
+    classification = json.dumps({
+        "task_type": "review",
+        "risk": "low",
+        "recommended_tool": "local_review_diff",
+        "recommended_model": "deepseek-coder",
+        "should_use_local": True,
+        "reasoning": "Simple code review",
+    })
+    _mock_ollama(classification)
+    result = await local_classify_task("review this diff for bugs")
+    assert "review" in result
+    assert "local_review_diff" in result
+
+
+@respx.mock
+async def test_local_classify_task_fallback():
+    _mock_ollama("I think this is a code review task.")
+    result = await local_classify_task("review this diff")
+    assert "code review" in result
