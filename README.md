@@ -456,6 +456,36 @@ candidate for routing to a lighter model via `routes.json`. Claude
 itself flagged this, suggesting *"could be worth routing that to a
 lighter model like llama3.2."*
 
+### Real-world result: multi-model benchmark
+
+Running `local_benchmark` with the prompt *"Write a Python function that
+validates email addresses"* across all installed models (RTX 4090):
+
+| Model              | Latency | Output tokens | Eval time | Status  |
+| ------------------ | ------- | ------------- | --------- | ------- |
+| `llama3.2`         | 2.4s    | 179           | 0.9s      | OK      |
+| `gemma4`           | 10.4s   | 750           | 6.6s      | OK      |
+| `phi3:medium-128k` | 11.3s   | 191           | 3.1s      | OK      |
+| `gemma4-32k`       | 12.1s   | 921           | 8.0s      | OK      |
+| `gemma4-16k`       | 18.6s   | 1,595         | 14.1s     | OK      |
+| `qwen3:8b`         | 83.5s   | 6,656         | 79.8s     | OK      |
+| `deepseek-r1:8b`   | —       | —             | —         | TIMEOUT |
+
+Takeaways:
+- **llama3.2** is the speed winner — 2.4s, most concise (179 tokens),
+  ideal for routing `local_implement_small` and `local_commit_message`
+- **phi3:medium-128k** balances speed and context window — similar
+  conciseness to llama3.2 but with 128K context
+- **gemma4 variants** produce longer outputs (750–1,595 tokens), useful
+  when thoroughness matters (reviews, test generation)
+- **qwen3:8b** over-generates at 6,656 tokens — the thinking overhead
+  isn't worth it for simple tasks
+- **deepseek-r1:8b** timed out at 180s — reasoning models are too heavy
+  for this task size
+
+These results directly inform routing config — fast models for
+mechanical tasks, thorough models for review and test generation.
+
 ## Critical gotchas
 
 - **Never write to stdout from this process.** stdio is the MCP transport.
