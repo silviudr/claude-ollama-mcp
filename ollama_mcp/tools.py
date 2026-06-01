@@ -1,6 +1,7 @@
 """MCP tool definitions."""
 
-from .client import generate, generate_json
+from .benchmark import format_results, run_benchmark
+from .client import generate, generate_json, list_models
 from .privacy import privacy_guard
 from .schemas import ReviewResult
 from .server import mcp
@@ -217,3 +218,45 @@ async def local_usage_stats() -> str:
             )
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+async def local_benchmark(prompt: str, system: str = "", models: str = "") -> str:
+    """Run the same prompt against multiple local Ollama models and compare
+    latency, token counts, and output. Returns a comparison table.
+
+    Use when:
+      - User wants to compare local model performance
+      - Choosing which model to use for a specific task type
+      - Evaluating a new model against existing ones
+
+    Args:
+        prompt: The prompt to send to each model.
+        system: Optional system prompt applied to all models.
+        models: Optional comma-separated list of model names to test.
+                If empty, benchmarks all models available in Ollama."""
+    model_list = (
+        [m.strip() for m in models.split(",") if m.strip()]
+        if models.strip()
+        else None
+    )
+    results = await run_benchmark(
+        prompt,
+        system=system or None,
+        models=model_list,
+    )
+    return format_results(results)
+
+
+@mcp.tool()
+async def local_list_models() -> str:
+    """List all models currently available in the local Ollama instance.
+
+    Use when:
+      - You need to know which local models are installed
+      - Before calling local_benchmark to pick model names
+      - User asks what models are available locally"""
+    models = await list_models()
+    if not models:
+        return "No models found. Install one with: ollama pull <model>"
+    return "Available local models:\n" + "\n".join(f"  - {m}" for m in models)
