@@ -53,6 +53,9 @@ claude-ollama-mcp/
 | `local_generate_tests`     | Generate pytest tests for a Python file                                  |
 | `local_usage_stats`        | Show usage statistics and estimated cloud cost avoided                   |
 | `local_benchmark`          | Compare prompt performance across multiple local models                  |
+| `local_list_models`        | List all models available in the local Ollama instance                   |
+| `local_show_routes`        | Show current model routing configuration                                 |
+| `local_classify_task`      | Classify a prompt and recommend the best tool and model                  |
 
 Each tool's docstring is what Claude sees. Iterate on the docstrings — that
 is the tuning loop, not the code.
@@ -139,9 +142,42 @@ claude mcp list
 | `OLLAMA_MCP_LOG`     | `~/.cache/ollama_mcp.jsonl`                 | Per-call structured log (JSON lines) |
 | `OLLAMA_MCP_DB`      | `~/.cache/ollama_mcp.db`                    | SQLite database for telemetry        |
 | `OLLAMA_MCP_PRIVACY` | `~/.config/ollama_mcp/privacy.json`         | Privacy intercept config             |
+| `OLLAMA_MCP_ROUTES`  | `~/.config/ollama_mcp/routes.json`          | Model routing config                 |
 
 Set these via `--env` at `claude mcp add`, by editing `~/.claude.json`, or
 in `.mcp.json` if registered per-project.
+
+## Model routing
+
+By default, all tools use the model set in `OLLAMA_MODEL`. To route
+different tools to different models, create a routing config:
+
+```bash
+mkdir -p ~/.config/ollama_mcp
+cat > ~/.config/ollama_mcp/routes.json <<'EOF'
+{
+  "default": "gemma4-32k",
+  "routes": {
+    "local_review_diff": "deepseek-coder",
+    "local_generate_tests": "qwen2.5-coder",
+    "local_implement_small": "deepseek-coder",
+    "local_summarize": "llama3.1",
+    "local_classify_task": "llama3.1"
+  }
+}
+EOF
+```
+
+Resolution order for each tool call:
+1. Exact match in `routes` → use that model
+2. `default` key in the config → use that
+3. `OLLAMA_MODEL` env var → use that
+
+Use `local_show_routes` (MCP tool) to see current routing, or
+`local_classify_task` to ask a local model which tool and model best fit
+a given prompt.
+
+To see which models are installed: `local_list_models` or `ollama list`.
 
 ## CLI
 
