@@ -1,0 +1,10 @@
+{
+  "default": "gemma4-32k",
+  "routes": {
+    "local_review_diff": "gemma4-32k",
+    "local_generate_tests": "gemma4-32k",
+    "local_implement_small": "gemma4-32k",
+    "local_summarize": "gemma4-32k",
+    "local_classify_task": "gemma4-32k"
+  }
+}
