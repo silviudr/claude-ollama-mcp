@@ -4,7 +4,7 @@ import httpx
 import pytest
 import respx
 
-from ollama_mcp.client import generate, generate_json
+from ollama_mcp.client import generate, generate_json, list_models
 from ollama_mcp.config import MODEL, OLLAMA_URL
 from ollama_mcp.errors import (
     OllamaConnectionError,
@@ -199,3 +199,70 @@ async def test_generate_json_includes_schema_in_system():
     assert "Be strict." in payload["system"]
     assert "JSON" in payload["system"]
     assert "schema" in payload["system"].lower()
+
+
+# --- model override tests ---
+
+
+TAGS_URL = f"{OLLAMA_URL}/api/tags"
+
+
+@respx.mock
+async def test_generate_with_model_override():
+    route = respx.post(API_URL).mock(return_value=httpx.Response(200, json={
+        "response": "ok",
+    }))
+
+    text, meta = await generate("test", model="custom-model")
+
+    payload = json.loads(route.calls[0].request.read())
+    assert payload["model"] == "custom-model"
+    assert meta["model"] == "custom-model"
+
+
+@respx.mock
+async def test_generate_uses_default_model_when_none():
+    route = respx.post(API_URL).mock(return_value=httpx.Response(200, json={
+        "response": "ok",
+    }))
+
+    text, meta = await generate("test")
+
+    payload = json.loads(route.calls[0].request.read())
+    assert payload["model"] == MODEL
+
+
+# --- list_models tests ---
+
+
+@respx.mock
+async def test_list_models():
+    respx.get(TAGS_URL).mock(return_value=httpx.Response(200, json={
+        "models": [
+            {"name": "llama3.1"},
+            {"name": "gemma4-32k"},
+            {"name": "deepseek-coder"},
+        ],
+    }))
+
+    models = await list_models()
+
+    assert models == ["deepseek-coder", "gemma4-32k", "llama3.1"]
+
+
+@respx.mock
+async def test_list_models_empty():
+    respx.get(TAGS_URL).mock(return_value=httpx.Response(200, json={
+        "models": [],
+    }))
+
+    models = await list_models()
+    assert models == []
+
+
+@respx.mock
+async def test_list_models_connection_error():
+    respx.get(TAGS_URL).mock(side_effect=httpx.ConnectError("refused"))
+
+    with pytest.raises(OllamaConnectionError):
+        await list_models()

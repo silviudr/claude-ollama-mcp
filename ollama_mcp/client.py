@@ -22,8 +22,13 @@ T = TypeVar("T", bound=BaseModel)
 TIMEOUT_S = 180
 
 
-async def generate(prompt: str, system: str | None = None) -> tuple[str, dict]:
-    payload: dict = {"model": MODEL, "prompt": prompt, "stream": False}
+async def generate(
+    prompt: str,
+    system: str | None = None,
+    model: str | None = None,
+) -> tuple[str, dict]:
+    use_model = model or MODEL
+    payload: dict = {"model": use_model, "prompt": prompt, "stream": False}
     if system:
         payload["system"] = system
     t0 = time.perf_counter()
@@ -36,7 +41,7 @@ async def generate(prompt: str, system: str | None = None) -> tuple[str, dict]:
         raise OllamaTimeout(TIMEOUT_S)
 
     if r.status_code == 404:
-        raise OllamaModelNotFound(MODEL)
+        raise OllamaModelNotFound(use_model)
     if r.status_code >= 400:
         raise OllamaServerError(r.status_code, r.text[:200])
 
@@ -48,7 +53,7 @@ async def generate(prompt: str, system: str | None = None) -> tuple[str, dict]:
     if "error" in data:
         msg = data["error"]
         if "not found" in msg.lower():
-            raise OllamaModelNotFound(MODEL)
+            raise OllamaModelNotFound(use_model)
         raise OllamaServerError(r.status_code, msg)
 
     if "response" not in data:
@@ -59,8 +64,21 @@ async def generate(prompt: str, system: str | None = None) -> tuple[str, dict]:
         "prompt_tokens": data.get("prompt_eval_count"),
         "output_tokens": data.get("eval_count"),
         "eval_ms": (data.get("eval_duration") or 0) // 1_000_000,
-        "model": MODEL,
+        "model": use_model,
     }
+
+
+async def list_models() -> list[str]:
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"{OLLAMA_URL}/api/tags")
+            r.raise_for_status()
+            data = r.json()
+    except httpx.ConnectError:
+        raise OllamaConnectionError()
+    except httpx.TimeoutException:
+        raise OllamaTimeout(10)
+    return sorted(m["name"] for m in data.get("models", []))
 
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)

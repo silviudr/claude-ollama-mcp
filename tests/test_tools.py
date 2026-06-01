@@ -7,16 +7,19 @@ import respx
 from ollama_mcp import storage
 from ollama_mcp.config import OLLAMA_URL
 from ollama_mcp.tools import (
+    local_benchmark,
     local_commit_message,
     local_draft_boilerplate,
     local_generate_tests,
     local_implement_small,
+    local_list_models,
     local_review_diff,
     local_summarize,
     local_usage_stats,
 )
 
 API_URL = f"{OLLAMA_URL}/api/generate"
+TAGS_URL = f"{OLLAMA_URL}/api/tags"
 
 
 def _mock_ollama(response_text: str = "ok"):
@@ -158,3 +161,54 @@ async def test_local_usage_stats_with_data():
     assert "Sonnet:" in result
     assert "local_summarize" in result
     assert "local_commit_message" in result
+
+
+@respx.mock
+async def test_local_benchmark_explicit_models():
+    respx.post(API_URL).mock(side_effect=[
+        httpx.Response(200, json={"response": "a1", "prompt_eval_count": 10, "eval_count": 5, "eval_duration": 50_000_000}),
+        httpx.Response(200, json={"response": "a2", "prompt_eval_count": 12, "eval_count": 8, "eval_duration": 80_000_000}),
+    ])
+    result = await local_benchmark("say hello", models="model-a,model-b")
+    assert "model-a" in result
+    assert "model-b" in result
+
+
+@respx.mock
+async def test_local_benchmark_auto_discover():
+    respx.get(TAGS_URL).mock(return_value=httpx.Response(200, json={
+        "models": [{"name": "alpha"}, {"name": "beta"}],
+    }))
+    respx.post(API_URL).mock(side_effect=[
+        httpx.Response(200, json={"response": "ok", "prompt_eval_count": 10, "eval_count": 5, "eval_duration": 50_000_000}),
+        httpx.Response(200, json={"response": "ok", "prompt_eval_count": 10, "eval_count": 5, "eval_duration": 50_000_000}),
+    ])
+    result = await local_benchmark("test")
+    assert "alpha" in result
+    assert "beta" in result
+
+
+@respx.mock
+async def test_local_benchmark_no_models():
+    respx.get(TAGS_URL).mock(return_value=httpx.Response(200, json={"models": []}))
+    result = await local_benchmark("test")
+    assert "No models available" in result
+
+
+@respx.mock
+async def test_local_list_models():
+    respx.get(TAGS_URL).mock(return_value=httpx.Response(200, json={
+        "models": [{"name": "gemma4-32k"}, {"name": "llama3.1"}, {"name": "deepseek-coder"}],
+    }))
+    result = await local_list_models()
+    assert "gemma4-32k" in result
+    assert "llama3.1" in result
+    assert "deepseek-coder" in result
+
+
+@respx.mock
+async def test_local_list_models_empty():
+    respx.get(TAGS_URL).mock(return_value=httpx.Response(200, json={"models": []}))
+    result = await local_list_models()
+    assert "No models found" in result
+    assert "ollama pull" in result
