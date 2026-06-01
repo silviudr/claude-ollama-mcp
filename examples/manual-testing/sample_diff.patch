@@ -1,0 +1,40 @@
+diff --git a/auth/handler.py b/auth/handler.py
+index 1a2b3c4..5d6e7f8 100644
+--- a/auth/handler.py
++++ b/auth/handler.py
+@@ -12,8 +12,11 @@ from datetime import datetime, timedelta
+
+ SECRET_KEY = os.environ.get("JWT_SECRET", "changeme")
+
+-def create_token(user_id: int) -> str:
+-    payload = {"sub": user_id, "exp": datetime.utcnow() + timedelta(hours=24)}
++def create_token(user_id: int, role: str = "user") -> str:
++    payload = {
++        "sub": user_id,
++        "role": role,
++        "exp": datetime.utcnow() + timedelta(hours=24),
++    }
+     return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+
+
+@@ -25,7 +28,9 @@ def verify_token(token: str) -> dict:
+         return None
+
+
+-def login(username: str, password: str) -> str | None:
++def login(request) -> str | None:
++    username = request.form["username"]
++    password = request.form["password"]
+     user = db.find_user(username)
+     if user and user.password == password:
+         return create_token(user.id)
+@@ -33,3 +38,9 @@ def login(username: str, password: str) -> str | None:
+
+ def logout(token: str):
+     blacklist.add(token)
++
++
++def admin_action(request):
++    token = request.headers.get("Authorization")
++    payload = verify_token(token)
++    return db.execute(payload["action"])

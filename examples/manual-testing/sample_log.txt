@@ -1,0 +1,27 @@
+2025-05-28T08:00:12Z [INFO] Application starting on port 8080
+2025-05-28T08:00:12Z [INFO] Connected to PostgreSQL at db.internal:5432
+2025-05-28T08:00:13Z [INFO] Redis connection pool initialized (max=20)
+2025-05-28T08:00:13Z [INFO] Loading ML model from /models/classifier-v3.2.bin (847MB)
+2025-05-28T08:00:45Z [INFO] Model loaded successfully in 32.1s
+2025-05-28T08:00:45Z [INFO] Health check endpoint ready at /healthz
+2025-05-28T08:01:02Z [INFO] First request received: POST /api/v2/classify
+2025-05-28T08:01:02Z [WARN] Slow query detected: SELECT * FROM features WHERE user_id=$1 (took 1.2s)
+2025-05-28T08:01:03Z [INFO] Classification complete: class=urgent, confidence=0.94
+2025-05-28T08:05:17Z [WARN] Redis connection timeout, retrying (attempt 1/3)
+2025-05-28T08:05:18Z [INFO] Redis reconnected successfully
+2025-05-28T08:12:33Z [ERROR] OutOfMemoryError during batch classification (batch_size=500)
+2025-05-28T08:12:33Z [ERROR] Traceback: torch.cuda.OutOfMemoryError: CUDA out of memory.
+    Tried to allocate 2.4 GB. GPU 0 has 11.2 GB total, 0.8 GB free.
+2025-05-28T08:12:34Z [WARN] Falling back to CPU for batch processing
+2025-05-28T08:12:58Z [INFO] Batch completed on CPU in 24.1s (GPU would have taken ~3.2s)
+2025-05-28T08:15:00Z [INFO] Scheduled job: pruning expired sessions (removed 1,247)
+2025-05-28T08:20:01Z [WARN] Disk usage at 87% on /data volume
+2025-05-28T08:30:00Z [INFO] Hourly metrics: requests=342, p50=45ms, p99=890ms, errors=2
+2025-05-28T08:30:00Z [INFO] GPU utilization avg=72%, memory avg=9.8GB/11.2GB
+2025-05-28T09:00:00Z [INFO] Hourly metrics: requests=1,205, p50=38ms, p99=1,240ms, errors=7
+2025-05-28T09:00:01Z [WARN] p99 latency exceeded SLO (target: 1000ms, actual: 1240ms)
+2025-05-28T09:15:22Z [ERROR] Connection refused to db.internal:5432
+2025-05-28T09:15:22Z [ERROR] Database health check failed — entering degraded mode
+2025-05-28T09:15:23Z [WARN] Serving cached responses for read endpoints
+2025-05-28T09:17:45Z [INFO] Database connection restored
+2025-05-28T09:17:45Z [INFO] Exiting degraded mode, resuming normal operations

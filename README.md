@@ -334,16 +334,17 @@ Two metrics worth watching:
 2. **Quality regressions** — keep a notes file when Claude has to redo work
    the local model produced. That is the real cost of delegation.
 
-## Example project
+## Examples
+
+### textkit — pure local delegation
 
 The `examples/textkit/` directory contains a toy Python library built entirely
 through local delegation as a proof-of-concept. It includes a `TASKS.md` with
 20 rows — each one a self-contained spec sized for a single Ollama call:
 
 - **Phase 1** (5 tasks) — boilerplate via `local_draft_boilerplate`
-  (`.gitignore`, `pyproject.toml`, CI workflow, etc.)
 - **Phase 2** (10 tasks) — pure-function implementations via
-  `local_implement_small` (`slugify`, `wrap_by_width`, `redact_secrets`, etc.)
+  `local_implement_small`
 - **Phase 3** (5 tasks) — pytest test files via `local_draft_boilerplate`
 
 Results from the test run (Gemma 4 27B, 32K context, RTX 4090):
@@ -361,6 +362,42 @@ Results from the test run (Gemma 4 27B, 32K context, RTX 4090):
 
 To try it yourself, start Claude Code inside the example directory and say
 *"work TASKS.md top-to-bottom."*
+
+### hybrid-workflow — Claude + local models together
+
+The `examples/hybrid-workflow/` directory demonstrates the real use case:
+Claude Code orchestrates a feature build, delegating mechanical work to
+Ollama while keeping cross-file reasoning for itself.
+
+An 8-step guided walkthrough builds out a task tracker app:
+
+| Step | Task                    | Handled by     | Why                                  |
+|------|------------------------|----------------|--------------------------------------|
+| 1    | Read & explain code    | Claude (cloud) | Needs repo context                   |
+| 2    | Implement utility fn   | Ollama (local) | Self-contained spec                  |
+| 3    | Draft pyproject.toml   | Ollama (local) | Mechanical boilerplate               |
+| 4    | Integrate features     | Claude (cloud) | Must match existing code patterns    |
+| 5    | Generate tests         | Ollama (local) | Given source, produce tests          |
+| 6    | Review the diff        | Ollama (local) | Structured review                    |
+| 7    | Write commit message   | Ollama (local) | One-liner from diff                  |
+| 8    | Check routing & stats  | Ollama (local) | Verify the split                     |
+
+3 cloud steps, 5 local steps. To try it: `cd examples/hybrid-workflow` and
+follow `TASKS.md`.
+
+### manual-testing — sample files for every feature
+
+The `examples/manual-testing/` directory contains sample inputs for testing
+each feature individually:
+
+- `prompts/` — ready-made prompts for benchmarking (code review, implementation, summarization)
+- `sample_module.py` — 5 pure functions for test generation
+- `sample_diff.patch` — auth handler with real bugs for code review
+- `sample_sensitive.patch` — diff full of secrets for testing privacy intercept
+- `sample_log.txt` — realistic app log for summarization
+- `sample_routes.json` — routing config ready to copy to `~/.config/ollama_mcp/`
+
+Quick start: `ollama-mcp bench examples/manual-testing/prompts/code_review.md`
 
 ## Critical gotchas
 

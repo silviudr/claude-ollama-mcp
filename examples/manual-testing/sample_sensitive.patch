@@ -1,0 +1,23 @@
+diff --git a/config/.env.production b/config/.env.production
+index aaa1111..bbb2222 100644
+--- a/config/.env.production
++++ b/config/.env.production
+@@ -1,5 +1,7 @@
+ DATABASE_URL=postgresql://admin:supersecret@db.internal:5432/prod
+ REDIS_URL=redis://redis.internal:6379/0
+-API_KEY=sk-proj-abc123def456ghi789jkl012mnopqrstuvwxyz
++API_KEY=sk-proj-NEWKEY999888777666555444333222111000
+ JWT_SECRET=my-jwt-secret-do-not-share
+ AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
++AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
++GITHUB_TOKEN=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij
+diff --git a/deploy/keys/server.pem b/deploy/keys/server.pem
+index ccc3333..ddd4444 100644
+--- a/deploy/keys/server.pem
++++ b/deploy/keys/server.pem
+@@ -1,5 +1,5 @@
+ -----BEGIN RSA PRIVATE KEY-----
+-MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MhgHcTz6sE2I2yPB
++MIIEowIBAAKCAQEA7K9nNlVIr1XQPZ8sYz2M0xR5vGHn1dWjE8QmFtIeHPNKxyz
+ aLVGMZxFq8zFNyPNMKU7aDVGIO8qNB5TW7F3BXKL8UDHO2j8KrTHPEi1MVOZ7Iq
+ -----END RSA PRIVATE KEY-----
