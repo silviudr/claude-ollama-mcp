@@ -2,7 +2,15 @@ import json
 
 import pytest
 
+from ollama_mcp import storage
 from ollama_mcp.privacy import PrivacyConfig, PrivacyError, privacy_guard, scan
+
+
+@pytest.fixture(autouse=True)
+def _use_tmp_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "test.db")
+    if hasattr(storage._local, "conn"):
+        del storage._local.conn
 
 
 # --- scan() tests ---

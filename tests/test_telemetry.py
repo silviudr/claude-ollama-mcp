@@ -1,7 +1,17 @@
 import json
 import time
 
+import pytest
+
+from ollama_mcp import storage
 from ollama_mcp.telemetry import observed, record
+
+
+@pytest.fixture(autouse=True)
+def _use_tmp_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "test.db")
+    if hasattr(storage._local, "conn"):
+        del storage._local.conn
 
 
 def test_record_appends_timestamp(tmp_path, monkeypatch):
@@ -38,6 +48,5 @@ async def test_observed_failure():
     async def failing_tool(prompt: str):
         raise ValueError("boom")
 
-    import pytest
     with pytest.raises(ValueError, match="boom"):
         await failing_tool("hello")

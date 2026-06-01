@@ -399,6 +399,63 @@ each feature individually:
 
 Quick start: `ollama-mcp bench examples/manual-testing/prompts/code_review.md`
 
+### Real-world result: hybrid code review
+
+When asked to *"review this diff for bugs"* with `sample_diff.patch` (an
+auth handler with intentional vulnerabilities), the local Gemma 4 model
+and Claude split the work:
+
+**Gemma 4 (local, free) found:**
+- Arbitrary DB command execution — `db.execute(payload["action"])` runs
+  unsanitized JWT claims
+- No authorization check — any authenticated user can call `admin_action`
+- NoneType crash — `verify_token` returns `None` on bad tokens, then
+  `payload["action"]` raises `TypeError`
+- Plaintext password comparison — `user.password == password` suggests
+  no hashing
+- Role escalation — `create_token(user.id)` now accepts a `role`
+  parameter that callers can abuse
+
+**Claude (cloud) supplemented with:**
+- Missing input validation — `request.form["username"]` raises `KeyError`
+  if the field is absent
+- "changeme" default secret — `SECRET_KEY` falls back to a hardcoded
+  string, making token forgery trivial
+
+The local model caught all critical and high-severity bugs. Claude
+reviewed the local output, confirmed the findings, and added
+medium-severity issues it missed — a natural division of labor where the
+expensive model only pays for the delta.
+
+### Real-world result: usage stats after a manual test session
+
+After running a handful of manual tests (summarize, implement, review,
+generate tests), asking *"show me my Ollama usage stats"* returns:
+
+| Metric       | Value                            |
+| ------------ | -------------------------------- |
+| Total calls  | 5                                |
+| Successful   | 4 (80%)                          |
+| Failed       | 1                                |
+| Avg latency  | 23.7s                            |
+| Tokens       | 2,725 in / 4,827 out             |
+| Cost avoided | ~$0.40 vs Opus, ~$0.08 vs Sonnet |
+
+Per-tool breakdown:
+
+| Tool                    | Calls | Tokens (in+out) | Avg latency |
+| ----------------------- | ----- | --------------- | ----------- |
+| `local_review_diff`     | 2     | 991 + 1,610     | 15.5s       |
+| `local_generate_tests`  | 1     | 492 + 2,469     | 23.3s       |
+| `local_summarize`       | 1     | 1,040 + 113     | 49.9s       |
+| `local_implement_small` | 1     | 202 + 635       | 6.0s        |
+
+Notable: `local_implement_small` is the fastest at 6s.
+`local_summarize` is the outlier at ~50s due to the long input — a
+candidate for routing to a lighter model via `routes.json`. Claude
+itself flagged this, suggesting *"could be worth routing that to a
+lighter model like llama3.2."*
+
 ## Critical gotchas
 
 - **Never write to stdout from this process.** stdio is the MCP transport.
