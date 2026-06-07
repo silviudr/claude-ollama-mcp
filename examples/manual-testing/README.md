@@ -61,7 +61,45 @@ Start a Claude Code session in any project and try each of these:
 ### Usage Stats
 > Show me my Ollama usage stats
 
-## 4. Privacy Intercept
+## 4. Data Analyzer
+
+The `local_analyze_data` tool profiles a CSV and decides whether to
+analyze it locally or hand off to Claude. The decision is based on a
+complexity score computed from six dimensions:
+
+| Signal                  | What it detects                                  | Score weight    |
+| ----------------------- | ------------------------------------------------ | --------------- |
+| Structural complexity   | Column count > 20 (`OLLAMA_MCP_MAX_COLS`)        | proportional    |
+| Data cardinality        | High ratio of unique values across columns       | avg ratio       |
+| Nested JSON             | JSON strings embedded in column values           | 0.4 per column  |
+| Multiple datetimes      | 2+ datetime columns needing alignment            | 0.3             |
+| Free-text columns       | Columns averaging > 60 chars / 8 words           | 0.5 per column  |
+| Foreign keys            | 2+ columns ending in `_id`, `_uuid`, `_key`, etc.| 0.3             |
+| Mixed-type columns      | Columns with both numeric and non-numeric values | 0.3             |
+
+If the weighted score exceeds `OLLAMA_MCP_COMPLEXITY_THRESHOLD`
+(default 0.7), the tool returns a **HANDOFF** with the dataset profile
+and sample rows so Claude can take over.
+
+### Simple dataset (analyzed locally)
+
+> Analyze examples/manual-testing/sample_simple.csv
+
+### Complex dataset (triggers handoff)
+
+> Analyze examples/manual-testing/sample_complex.csv
+
+### With a specific question
+
+> What's the average salary by department in sample_simple.csv?
+
+### Force Claude to handle it
+
+> Analyze sample_simple.csv but use Claude for this one
+
+Claude passes `force_handoff=true`, bypassing the triage.
+
+## 5. Privacy Intercept
 
 > Review this diff: [paste contents of sample_sensitive.patch]
 
@@ -72,7 +110,7 @@ tail -1 ~/.cache/ollama_mcp.jsonl | python3 -m json.tool
 
 Look for `"event": "privacy_intercept"` in the log.
 
-## 5. Routing Config
+## 6. Routing Config
 
 ```bash
 # Create a routing config
@@ -84,7 +122,7 @@ cp examples/manual-testing/sample_routes.json ~/.config/ollama_mcp/routes.json
 # > Review this diff: [paste sample_diff.patch]  — should use the routed model
 ```
 
-## 6. SQLite Inspection
+## 7. SQLite Inspection
 
 After running a few tools, inspect the database:
 

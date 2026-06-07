@@ -21,17 +21,19 @@ claude-ollama-mcp/
 ├── ollama_mcp/           # Python package
 │   ├── __init__.py       # re-exports mcp server instance
 │   ├── __main__.py       # CLI: serve (default), bench, stats
+│   ├── analyzer.py       # CSV triage and data profiling
 │   ├── benchmark.py      # multi-model performance comparison
 │   ├── client.py         # Ollama HTTP client with error handling
 │   ├── config.py         # env-driven settings
 │   ├── errors.py         # structured error types
 │   ├── privacy.py        # sensitive content detection and intercept
+│   ├── router.py         # per-tool model routing
 │   ├── schemas.py        # Pydantic models for structured outputs
 │   ├── server.py         # FastMCP instance
 │   ├── storage.py        # SQLite telemetry and cost tracking
 │   ├── telemetry.py      # JSON-lines logging, observed() decorator
 │   └── tools.py          # MCP tool definitions
-├── tests/                # pytest suite (89 tests)
+├── tests/                # pytest suite (132 tests)
 ├── pyproject.toml        # packaging (pip installable)
 ├── requirements.txt      # mcp[cli], httpx
 ├── examples/             # toy project built entirely via local delegation
@@ -56,6 +58,7 @@ claude-ollama-mcp/
 | `local_list_models`        | List all models available in the local Ollama instance                   |
 | `local_show_routes`        | Show current model routing configuration                                 |
 | `local_classify_task`      | Classify a prompt and recommend the best tool and model                  |
+| `local_analyze_data`       | Analyze a CSV file — triage locally or hand off to Claude                |
 
 Each tool's docstring is what Claude sees. Iterate on the docstrings — that
 is the tuning loop, not the code.
@@ -143,6 +146,9 @@ claude mcp list
 | `OLLAMA_MCP_DB`      | `~/.cache/ollama_mcp.db`                    | SQLite database for telemetry        |
 | `OLLAMA_MCP_PRIVACY` | `~/.config/ollama_mcp/privacy.json`         | Privacy intercept config             |
 | `OLLAMA_MCP_ROUTES`  | `~/.config/ollama_mcp/routes.json`          | Model routing config                 |
+| `OLLAMA_MCP_SAMPLE_ROWS` | `50`                                   | Rows to sample for data analysis     |
+| `OLLAMA_MCP_MAX_COLS` | `20`                                       | Column count threshold for handoff   |
+| `OLLAMA_MCP_COMPLEXITY_THRESHOLD` | `0.7`                          | Complexity score above which to hand off |
 
 Set these via `--env` at `claude mcp add`, by editing `~/.claude.json`, or
 in `.mcp.json` if registered per-project.
@@ -230,6 +236,74 @@ graceful fallback — the call is never wasted.
 
 New tools can opt into structured output by defining a Pydantic model in
 `schemas.py` and calling `generate_json()` from `client.py`.
+
+## Data analyzer
+
+`local_analyze_data` provides CSV analysis with an automatic triage
+layer. Simple datasets are analyzed locally; complex ones are handed off
+to Claude with full metadata.
+
+### How triage works
+
+The analyzer reads the CSV, profiles every column, and scores complexity
+on five dimensions:
+
+| Signal                  | What it detects                                  | Score weight |
+| ----------------------- | ------------------------------------------------ | ------------ |
+| Structural complexity   | Column count > `OLLAMA_MCP_MAX_COLS` (default 20)| proportional |
+| Data cardinality        | High ratio of unique values → reasoning challenge| avg ratio    |
+| Nested JSON             | JSON strings in column values                    | 0.4 per col  |
+| Multiple datetimes      | 2+ datetime columns needing alignment            | 0.3          |
+| Free-text columns       | Columns avg > 60 chars / 8 words (NLP needed)    | 0.5 per col  |
+| Foreign keys            | 2+ columns ending in `_id`, `_uuid`, `_key`, etc.| 0.3          |
+
+If the weighted score exceeds `OLLAMA_MCP_COMPLEXITY_THRESHOLD` (default
+0.7), the tool returns a `HANDOFF` with the dataset profile and sample
+rows attached so Claude can take over.
+
+### Usage
+
+```
+# Simple dataset → analyzed locally
+"Analyze examples/manual-testing/sample_simple.csv"
+
+# Complex dataset → auto-handoff to Claude
+"Analyze examples/manual-testing/sample_complex.csv"
+
+# Force Claude to handle it regardless of complexity
+"Analyze sample_simple.csv but use Claude for this one"
+# (Claude passes force_handoff=true)
+
+# With a specific question
+"What's the average salary by department in sample_simple.csv?"
+```
+
+### Handoff output
+
+When the triage triggers a handoff, Claude receives the full profile:
+
+```
+HANDOFF: Complexity score 0.82 exceeds threshold 0.7.
+
+File: data.csv
+Rows: 50000 (sampled 50)
+Columns: 22
+
+Reasons:
+  - High column count: 22 (max 20)
+  - Nested JSON in: metadata, ip_geo, feature_flags
+  - Free-text columns: error_message
+  - Multiple foreign keys (3): user_id, session_id, order_id
+
+Sample (first 10 rows):
+[CSV data]
+
+Claude should take over for deeper analysis.
+```
+
+Claude then uses its own reasoning on the metadata and sample — cross-column
+correlations, temporal patterns, causal questions — things a local model
+can't reliably do.
 
 ## Privacy intercept
 

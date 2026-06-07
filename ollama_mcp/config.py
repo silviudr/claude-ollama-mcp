@@ -23,5 +23,10 @@ ROUTES_CONFIG_PATH = Path(
         str(Path.home() / ".config" / "ollama_mcp" / "routes.json"),
     )
 )
+
+# Data analyzer settings
+ANALYSIS_SAMPLE_ROWS = int(os.environ.get("OLLAMA_MCP_SAMPLE_ROWS", "50"))
+ANALYSIS_MAX_COLS = int(os.environ.get("OLLAMA_MCP_MAX_COLS", "20"))
+ANALYSIS_THRESHOLD = float(os.environ.get("OLLAMA_MCP_COMPLEXITY_THRESHOLD", "0.7"))
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)

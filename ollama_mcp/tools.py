@@ -1,10 +1,11 @@
 """MCP tool definitions."""
 
+from .analyzer import read_csv_meta
 from .benchmark import format_results, run_benchmark
 from .client import generate, generate_json, list_models
 from .privacy import privacy_guard
 from .router import get_routes_info, resolve_model
-from .schemas import ReviewResult, TaskClassification
+from .schemas import AnalysisResult, ReviewResult, TaskClassification
 from .server import mcp
 from .storage import get_stats
 from .telemetry import observed
@@ -326,3 +327,78 @@ async def local_classify_task(prompt: str) -> str:
     if parsed is not None:
         return parsed.format(), meta
     return raw, meta
+
+
+@mcp.tool()
+@observed("local_analyze_data")
+async def local_analyze_data(
+    file_path: str, question: str = "", force_handoff: bool = False
+) -> str:
+    """Analyze a CSV file locally. Reads the file, profiles columns, and
+    scores complexity. Simple datasets are analyzed by the local model.
+    Complex datasets return a structured handoff with metadata so Claude
+    can take over.
+
+    Use when:
+      - User asks to analyze, explore, or summarize a CSV file
+      - Quick data profiling or quality checks
+      - Initial triage before deeper analysis
+
+    Do NOT use when:
+      - The file is not CSV
+      - The analysis requires joining multiple files
+
+    Args:
+        file_path: Absolute path to the CSV file.
+        question: Optional specific question about the data. If empty,
+                  a general analysis is performed.
+        force_handoff: If true, skip local analysis entirely and return
+                       metadata for Claude to handle. Use when the user
+                       wants Claude's reasoning regardless of complexity."""
+    from .config import ANALYSIS_THRESHOLD
+
+    try:
+        meta = read_csv_meta(file_path)
+    except (FileNotFoundError, ValueError) as e:
+        return str(e), {"model": "none", "wall_ms": 0}
+
+    summary = meta.format_summary()
+
+    if force_handoff or meta.handoff:
+        reason = "User requested Claude analysis" if force_handoff else (
+            f"Complexity score {meta.complexity_score:.2f} "
+            f"exceeds threshold {ANALYSIS_THRESHOLD}"
+        )
+        handoff_msg = (
+            f"HANDOFF: {reason}.\n\n"
+            f"{summary}\n\n"
+            f"Sample (first 10 rows):\n{meta.sample_as_text()}\n\n"
+            "Claude should take over for deeper analysis."
+        )
+        if question.strip():
+            handoff_msg += f"\n\nUser question: {question.strip()}"
+        return handoff_msg, {"model": "triage", "wall_ms": 0}
+
+    prompt_parts = [
+        f"Dataset summary:\n{summary}",
+        f"\nSample data (first 10 rows):\n{meta.sample_as_text()}",
+    ]
+    if question.strip():
+        prompt_parts.append(f"\nSpecific question: {question.strip()}")
+
+    parsed, raw, gen_meta = await generate_json(
+        "\n".join(prompt_parts),
+        AnalysisResult,
+        system=(
+            "You are a data analyst. Analyze the CSV dataset described below.\n"
+            "Return JSON with: summary (overview of the data), insights "
+            "(list of findings about distributions, outliers, quality issues, "
+            "patterns), row_count, and col_count.\n"
+            "Be specific — reference column names and values."
+        ),
+        model=resolve_model("local_analyze_data"),
+    )
+
+    if parsed is not None:
+        return parsed.format(), gen_meta
+    return f"{summary}\n\nAnalysis:\n{raw}", gen_meta
