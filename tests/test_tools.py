@@ -7,6 +7,7 @@ import respx
 from ollama_mcp import storage
 from ollama_mcp.config import OLLAMA_URL
 from ollama_mcp.tools import (
+    local_analyze_data,
     local_benchmark,
     local_classify_task,
     local_commit_message,
@@ -257,3 +258,64 @@ async def test_local_classify_task_fallback():
     _mock_ollama("I think this is a code review task.")
     result = await local_classify_task("review this diff")
     assert "code review" in result
+
+
+# --- local_analyze_data tests ---
+
+
+@respx.mock
+async def test_local_analyze_data_simple(tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("name,age\nAlice,30\nBob,25\n")
+    analysis = json.dumps({
+        "summary": "Small dataset with names and ages",
+        "insights": [{"category": "distribution", "column": "age", "description": "ages range 25-30", "severity": "LOW"}],
+        "row_count": 2,
+        "col_count": 2,
+    })
+    _mock_ollama(analysis)
+    result = await local_analyze_data(str(csv_path))
+    assert "names and ages" in result
+
+
+async def test_local_analyze_data_force_handoff(tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("name,age\nAlice,30\nBob,25\n")
+    result = await local_analyze_data(str(csv_path), force_handoff=True)
+    assert "HANDOFF" in result
+    assert "User requested" in result
+
+
+async def test_local_analyze_data_auto_handoff(tmp_path):
+    import csv as csv_mod
+    csv_path = tmp_path / "wide.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv_mod.writer(f)
+        headers = [f"col_{i}" for i in range(25)]
+        writer.writerow(headers)
+        for i in range(100):
+            writer.writerow([f"unique_{i}_{j}" for j in range(25)])
+    result = await local_analyze_data(str(csv_path))
+    assert "HANDOFF" in result
+
+
+async def test_local_analyze_data_file_not_found():
+    result = await local_analyze_data("/nonexistent/data.csv")
+    assert "not found" in result.lower()
+
+
+async def test_local_analyze_data_non_csv(tmp_path):
+    p = tmp_path / "data.xlsx"
+    p.write_text("fake")
+    result = await local_analyze_data(str(p))
+    assert "CSV" in result
+
+
+async def test_local_analyze_data_force_handoff_with_question(tmp_path):
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("name,age\nAlice,30\n")
+    result = await local_analyze_data(
+        str(csv_path), question="What is the average age?", force_handoff=True
+    )
+    assert "HANDOFF" in result
+    assert "average age" in result

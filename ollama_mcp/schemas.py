@@ -62,3 +62,31 @@ class TaskClassification(BaseModel):
             f"Reasoning:         {self.reasoning}",
         ]
         return "\n".join(lines)
+
+
+class DataInsight(BaseModel):
+    category: str = Field(description="E.g. distribution, outlier, correlation, quality")
+    column: str | None = None
+    description: str
+    severity: Literal["HIGH", "MEDIUM", "LOW"] = "MEDIUM"
+
+
+class AnalysisResult(BaseModel):
+    summary: str
+    insights: list[DataInsight] = []
+    row_count: int = 0
+    col_count: int = 0
+
+    def format(self) -> str:
+        lines = [
+            f"Rows: {self.row_count}, Columns: {self.col_count}",
+            "",
+            self.summary,
+        ]
+        if self.insights:
+            lines.append("")
+            lines.append("Insights:")
+            for i in self.insights:
+                col = f" ({i.column})" if i.column else ""
+                lines.append(f"  [{i.severity}] {i.category}{col}: {i.description}")
+        return "\n".join(lines)
