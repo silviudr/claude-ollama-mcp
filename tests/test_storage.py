@@ -101,3 +101,60 @@ def test_null_tokens_treated_as_zero():
     stats = storage.get_stats()
     assert stats["total_prompt_tokens"] == 0
     assert stats["total_output_tokens"] == 0
+
+
+# --- Per-backend breakdown ---
+
+
+def test_per_backend_single_backend():
+    storage.log_call(_make_event(backend="ollama"))
+    storage.log_call(_make_event(backend="ollama"))
+    stats = storage.get_stats()
+    assert "ollama" in stats["per_backend"]
+    assert stats["per_backend"]["ollama"]["calls"] == 2
+    assert "estimated_cost_avoided" in stats["per_backend"]["ollama"]
+
+
+def test_per_backend_multiple_backends():
+    storage.log_call(_make_event(backend="ollama", prompt_tokens=100, output_tokens=50))
+    storage.log_call(_make_event(
+        backend="openrouter", prompt_tokens=200, output_tokens=80,
+        cost=0.001, model="google/gemma-3-27b-it",
+    ))
+    stats = storage.get_stats()
+    assert "ollama" in stats["per_backend"]
+    assert "openrouter" in stats["per_backend"]
+    assert stats["per_backend"]["ollama"]["calls"] == 1
+    assert stats["per_backend"]["ollama"]["prompt_tokens"] == 100
+    assert stats["per_backend"]["openrouter"]["calls"] == 1
+    assert stats["per_backend"]["openrouter"]["prompt_tokens"] == 200
+    assert stats["per_backend"]["openrouter"]["total_cost"] == pytest.approx(0.001)
+
+
+def test_per_backend_cost_only_on_ollama():
+    storage.log_call(_make_event(backend="ollama"))
+    storage.log_call(_make_event(backend="openrouter", cost=0.005))
+    stats = storage.get_stats()
+    assert "estimated_cost_avoided" in stats["per_backend"]["ollama"]
+    assert "estimated_cost_avoided" not in stats["per_backend"]["openrouter"]
+
+
+def test_per_backend_null_backend_treated_as_ollama():
+    storage.log_call(_make_event())  # no backend key
+    stats = storage.get_stats()
+    assert "ollama" in stats["per_backend"]
+    assert stats["per_backend"]["ollama"]["calls"] == 1
+
+
+def test_openrouter_cost_aggregation():
+    storage.log_call(_make_event(backend="openrouter", cost=0.001))
+    storage.log_call(_make_event(backend="openrouter", cost=0.002))
+    storage.log_call(_make_event(backend="openrouter", cost=None))
+    stats = storage.get_stats()
+    assert stats["per_backend"]["openrouter"]["total_cost"] == pytest.approx(0.003)
+    assert stats["per_backend"]["openrouter"]["calls"] == 3
+
+
+def test_empty_db_has_no_per_backend():
+    stats = storage.get_stats()
+    assert stats["per_backend"] == {}

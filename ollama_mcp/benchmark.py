@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from .client import generate, list_models
+from .backends import Backend
 
 
 @dataclass
 class ModelResult:
     model: str
+    backend: str
     success: bool
     response: str
     wall_ms: int
@@ -23,16 +24,32 @@ async def run_benchmark(
     prompt: str,
     system: str | None = None,
     models: list[str] | None = None,
+    backend: Backend | None = None,
+    targets: list[tuple[Backend, str]] | None = None,
 ) -> list[ModelResult]:
-    if models is None:
-        models = await list_models()
+    """Benchmark one or more models.
+
+    Args:
+        targets: Explicit (backend, model) pairs. Takes priority.
+        models: Model names to benchmark on a single backend.
+        backend: Backend to use with ``models``. Defaults to the
+                 default Ollama backend resolved from config.
+    """
+    if targets is None:
+        if backend is None:
+            from .router import resolve
+            backend, _ = resolve("local_benchmark")
+        if models is None:
+            models = await backend.list_models()
+        targets = [(backend, m) for m in models]
 
     results: list[ModelResult] = []
-    for model in models:
+    for be, model in targets:
         try:
-            text, meta = await generate(prompt, system=system, model=model)
+            text, meta = await be.generate(prompt, system=system, model=model)
             results.append(ModelResult(
                 model=model,
+                backend=be.name,
                 success=True,
                 response=text,
                 wall_ms=meta.get("wall_ms", 0),
@@ -43,6 +60,7 @@ async def run_benchmark(
         except Exception as e:
             results.append(ModelResult(
                 model=model,
+                backend=be.name,
                 success=False,
                 response="",
                 wall_ms=0,
@@ -59,22 +77,24 @@ def format_results(results: list[ModelResult]) -> str:
     if not results:
         return "No models available for benchmarking."
 
-    # Header
+    multi_backend = len({r.backend for r in results}) > 1
+
     lines = [
         f"{'model':<25} {'latency':>8} {'tokens':>8} {'eval_ms':>8} {'status':>8}  notes",
         "-" * 85,
     ]
 
     for r in sorted(results, key=lambda r: r.wall_ms if r.success else 999_999):
+        name = f"{r.backend}/{r.model}" if multi_backend else r.model
         if r.success:
             tok = f"{r.prompt_tokens}+{r.output_tokens}"
             preview = r.response.replace("\n", " ")[:40]
             lines.append(
-                f"{r.model:<25} {r.wall_ms:>7}ms {tok:>8} {r.eval_ms:>7}ms {'ok':>8}  {preview}"
+                f"{name:<25} {r.wall_ms:>7}ms {tok:>8} {r.eval_ms:>7}ms {'ok':>8}  {preview}"
             )
         else:
             lines.append(
-                f"{r.model:<25} {'—':>8} {'—':>8} {'—':>8} {'FAIL':>8}  {r.error or 'unknown'}"
+                f"{name:<25} {'—':>8} {'—':>8} {'—':>8} {'FAIL':>8}  {r.error or 'unknown'}"
             )
 
     succeeded = [r for r in results if r.success]

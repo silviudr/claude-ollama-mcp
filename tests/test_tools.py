@@ -130,7 +130,9 @@ async def test_local_generate_tests_empty_context():
 
 
 @pytest.fixture(autouse=True)
-def _use_tmp_db(tmp_path, monkeypatch):
+def _isolate_config(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", tmp_path / "nonexistent.json")
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "test.db")
     if hasattr(storage._local, "conn"):
         del storage._local.conn
@@ -138,32 +140,50 @@ def _use_tmp_db(tmp_path, monkeypatch):
 
 async def test_local_usage_stats_empty():
     result = await local_usage_stats()
-    assert result == "No local tool calls recorded yet."
+    assert result == "No tool calls recorded yet."
 
 
 async def test_local_usage_stats_with_data():
     import time
     storage.log_call({
         "ts": time.time(), "tool": "local_summarize", "ok": True,
-        "model": "gemma4-32k", "input_chars": 100, "output_chars": 50,
+        "model": "gemma4-32k", "backend": "ollama",
+        "input_chars": 100, "output_chars": 50,
         "prompt_tokens": 500, "output_tokens": 200,
         "total_ms": 1500, "wall_ms": 1400, "eval_ms": 1200,
     })
     storage.log_call({
         "ts": time.time(), "tool": "local_commit_message", "ok": True,
-        "model": "gemma4-32k", "input_chars": 80, "output_chars": 30,
+        "model": "gemma4-32k", "backend": "ollama",
+        "input_chars": 80, "output_chars": 30,
         "prompt_tokens": 300, "output_tokens": 100,
         "total_ms": 800, "wall_ms": 700, "eval_ms": 600,
     })
     result = await local_usage_stats()
-    assert "Local calls:   2" in result
+    assert "Total calls:   2" in result
     assert "Successful:    2" in result
     assert "Prompt tokens:  800" in result
     assert "Output tokens:  300" in result
-    assert "Opus:" in result
-    assert "Sonnet:" in result
+    assert "── ollama ──" in result
+    assert "Cost avoided" in result
     assert "local_summarize" in result
     assert "local_commit_message" in result
+
+
+async def test_local_usage_stats_with_openrouter():
+    import time
+    storage.log_call({
+        "ts": time.time(), "tool": "local_review_diff", "ok": True,
+        "model": "google/gemma-3-27b-it", "backend": "openrouter",
+        "input_chars": 200, "output_chars": 100,
+        "prompt_tokens": 400, "output_tokens": 150,
+        "total_ms": 2000, "wall_ms": 1900, "eval_ms": 0,
+        "cost": 0.000123,
+    })
+    result = await local_usage_stats()
+    assert "── openrouter ──" in result
+    assert "Cost spent:" in result
+    assert "$0.000123" in result
 
 
 @respx.mock
@@ -213,15 +233,14 @@ async def test_local_list_models():
 async def test_local_list_models_empty():
     respx.get(TAGS_URL).mock(return_value=httpx.Response(200, json={"models": []}))
     result = await local_list_models()
-    assert "No models found" in result
-    assert "ollama pull" in result
+    assert "no models available" in result
 
 
 async def test_local_show_routes(monkeypatch):
     import ollama_mcp.router as router
     monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", router.ROUTES_CONFIG_PATH.parent / "nonexistent")
     result = await local_show_routes()
-    assert "No routing config" in result
+    assert "No per-tool routes" in result
 
 
 async def test_local_show_routes_with_config(tmp_path, monkeypatch):

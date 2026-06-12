@@ -1,9 +1,14 @@
 # claude-ollama-mcp
 
 A small MCP (Model Context Protocol) server that lets Claude Code delegate
-specific, low-stakes coding tasks to a local Ollama model (default Gemma 4).
-The goal is **routing**, not replacement: Claude stays the orchestrator and
-calls these tools when the work is cheap enough to be worth offloading.
+specific, low-stakes coding tasks to a local Ollama model or to
+[OpenRouter](https://openrouter.ai) (a cloud LLM gateway with hundreds of
+models). The goal is **routing**, not replacement: Claude stays the
+orchestrator and calls these tools when the work is cheap enough to be worth
+offloading.
+
+**No GPU?** No problem — configure OpenRouter as your backend and route
+every tool through the cloud for pennies per call.
 
 ## Why this exists
 
@@ -22,18 +27,22 @@ claude-ollama-mcp/
 │   ├── __init__.py       # re-exports mcp server instance
 │   ├── __main__.py       # CLI: serve (default), bench, stats
 │   ├── analyzer.py       # CSV triage and data profiling
+│   ├── backends/         # pluggable LLM backends
+│   │   ├── base.py       # Backend ABC (generate, generate_json, list_models)
+│   │   ├── ollama.py     # local Ollama inference
+│   │   └── openrouter.py # OpenRouter cloud inference (OpenAI-compatible)
 │   ├── benchmark.py      # multi-model performance comparison
-│   ├── client.py         # Ollama HTTP client with error handling
+│   ├── client.py         # compatibility shim (delegates to OllamaBackend)
 │   ├── config.py         # env-driven settings
-│   ├── errors.py         # structured error types
+│   ├── errors.py         # structured error types (Ollama + OpenRouter)
 │   ├── privacy.py        # sensitive content detection and intercept
-│   ├── router.py         # per-tool model routing
+│   ├── router.py         # per-tool backend + model routing
 │   ├── schemas.py        # Pydantic models for structured outputs
 │   ├── server.py         # FastMCP instance
 │   ├── storage.py        # SQLite telemetry and cost tracking
 │   ├── telemetry.py      # JSON-lines logging, observed() decorator
 │   └── tools.py          # MCP tool definitions
-├── tests/                # pytest suite (132 tests)
+├── tests/                # pytest suite (221 tests)
 ├── pyproject.toml        # packaging (pip installable)
 ├── requirements.txt      # mcp[cli], httpx
 ├── examples/             # toy project built entirely via local delegation
@@ -120,6 +129,16 @@ claude mcp add -s user ollama-local \
 Replace `gemma4-32k` with whatever `ollama list` shows for your model.
 Use `-s project` instead if you only want one repo to see the server.
 
+If using OpenRouter (with or without Ollama), add the API key:
+
+```bash
+claude mcp add -s user ollama-local \
+  --env OLLAMA_MODEL=gemma4-32k \
+  --env OPENROUTER_API_KEY=sk-or-v1-... \
+  -- $(pwd)/.venv/bin/python \
+     -m ollama_mcp
+```
+
 If installed via `pip install` (non-editable), the console script also works:
 
 ```bash
@@ -138,14 +157,27 @@ claude mcp list
 
 ## Configuration (env vars)
 
+**Core:**
+
 | Var                  | Default                                     | Purpose                              |
 | -------------------- | ------------------------------------------- | ------------------------------------ |
 | `OLLAMA_URL`         | `http://localhost:11434`                    | Where to reach Ollama                |
-| `OLLAMA_MODEL`       | `gemma4-32k`                                | Model tag to use                     |
+| `OLLAMA_MODEL`       | `gemma4-32k`                                | Default model tag                    |
+| `OPENROUTER_API_KEY` | *(none)*                                    | OpenRouter API key (required if using OpenRouter via `api_key_env`) |
+| `OLLAMA_MCP_ROUTES`  | `~/.config/ollama_mcp/routes.json`          | Backend and model routing config     |
+
+**Telemetry & privacy:**
+
+| Var                  | Default                                     | Purpose                              |
+| -------------------- | ------------------------------------------- | ------------------------------------ |
 | `OLLAMA_MCP_LOG`     | `~/.cache/ollama_mcp.jsonl`                 | Per-call structured log (JSON lines) |
 | `OLLAMA_MCP_DB`      | `~/.cache/ollama_mcp.db`                    | SQLite database for telemetry        |
 | `OLLAMA_MCP_PRIVACY` | `~/.config/ollama_mcp/privacy.json`         | Privacy intercept config             |
-| `OLLAMA_MCP_ROUTES`  | `~/.config/ollama_mcp/routes.json`          | Model routing config                 |
+
+**Data analyzer:**
+
+| Var                  | Default                                     | Purpose                              |
+| -------------------- | ------------------------------------------- | ------------------------------------ |
 | `OLLAMA_MCP_SAMPLE_ROWS` | `50`                                   | Rows to sample for data analysis     |
 | `OLLAMA_MCP_MAX_COLS` | `20`                                       | Column count threshold for handoff   |
 | `OLLAMA_MCP_COMPLEXITY_THRESHOLD` | `0.7`                          | Complexity score above which to hand off |
@@ -153,10 +185,19 @@ claude mcp list
 Set these via `--env` at `claude mcp add`, by editing `~/.claude.json`, or
 in `.mcp.json` if registered per-project.
 
-## Model routing
+## Backends & routing
 
-By default, all tools use the model set in `OLLAMA_MODEL`. To route
-different tools to different models, create a routing config:
+The server supports two backends:
+
+| Backend        | Where it runs    | Cost       | Needs GPU? | Best for                       |
+| -------------- | ---------------- | ---------- | ---------- | ------------------------------ |
+| **Ollama**     | Your machine     | Free       | Yes        | Fast iteration, privacy        |
+| **OpenRouter** | openrouter.ai    | Per-token  | No         | No GPU, access to many models  |
+
+### Quick start: Ollama only (default)
+
+By default, all tools use the local Ollama model set in `OLLAMA_MODEL`.
+To route different tools to different local models:
 
 ```bash
 mkdir -p ~/.config/ollama_mcp
@@ -166,24 +207,116 @@ cat > ~/.config/ollama_mcp/routes.json <<'EOF'
   "routes": {
     "local_review_diff": "deepseek-coder",
     "local_generate_tests": "qwen2.5-coder",
-    "local_implement_small": "deepseek-coder",
-    "local_summarize": "llama3.1",
-    "local_classify_task": "llama3.1"
+    "local_implement_small": "deepseek-coder"
   }
 }
 EOF
 ```
 
-Resolution order for each tool call:
-1. Exact match in `routes` → use that model
-2. `default` key in the config → use that
-3. `OLLAMA_MODEL` env var → use that
+This legacy format still works and is treated as pure Ollama.
 
-Use `local_show_routes` (MCP tool) to see current routing, or
-`local_classify_task` to ask a local model which tool and model best fit
-a given prompt.
+### Quick start: OpenRouter (no GPU needed)
 
-To see which models are installed: `local_list_models` or `ollama list`.
+1. Get an API key at [openrouter.ai/keys](https://openrouter.ai/keys)
+2. Set the environment variable:
+
+```bash
+export OPENROUTER_API_KEY="sk-or-v1-..."
+```
+
+3. Create the routing config:
+
+```bash
+mkdir -p ~/.config/ollama_mcp
+cat > ~/.config/ollama_mcp/routes.json <<'EOF'
+{
+  "default_backend": "openrouter",
+  "backends": {
+    "openrouter": {
+      "api_key_env": "OPENROUTER_API_KEY",
+      "default_model": "google/gemma-3-27b-it:free"
+    }
+  }
+}
+EOF
+```
+
+That's it — all tools now route through OpenRouter. The `:free` suffix
+on the model name selects OpenRouter's free tier (rate-limited but $0).
+
+### Hybrid: Ollama + OpenRouter
+
+Mix local and cloud backends per tool. Keep cheap tasks local, route
+quality-sensitive ones to a stronger cloud model:
+
+```json
+{
+  "default_backend": "ollama",
+  "backends": {
+    "ollama": {
+      "url": "http://localhost:11434",
+      "default_model": "gemma4-32k"
+    },
+    "openrouter": {
+      "api_key_env": "OPENROUTER_API_KEY",
+      "default_model": "google/gemma-3-27b-it:free"
+    }
+  },
+  "routes": {
+    "local_review_diff": { "backend": "openrouter", "model": "google/gemma-3-27b-it" },
+    "local_generate_tests": { "backend": "openrouter", "model": "google/gemma-3-27b-it" },
+    "local_summarize": "gemma4-32k",
+    "local_commit_message": "gemma4-32k"
+  }
+}
+```
+
+Routes can be either:
+- A **bare model string** (`"gemma4-32k"`) — uses the default backend
+- A **dict** with `backend` and `model` — explicit backend selection
+
+### Backend configuration reference
+
+**Ollama backend:**
+```json
+{
+  "url": "http://localhost:11434",
+  "default_model": "gemma4-32k"
+}
+```
+
+**OpenRouter backend:**
+```json
+{
+  "api_key_env": "OPENROUTER_API_KEY",
+  "default_model": "google/gemma-3-27b-it:free",
+  "url": "https://openrouter.ai/api/v1"
+}
+```
+
+- `api_key_env` — name of the environment variable holding your API key
+  (recommended — keeps keys out of config files)
+- `api_key` — alternative: put the key directly in the config (less
+  secure, but simpler for local-only setups)
+- `default_model` — used when a route doesn't specify a model
+- `url` — override if using an OpenRouter-compatible proxy (optional)
+
+Browse available models at [openrouter.ai/models](https://openrouter.ai/models).
+Free models have `:free` in their ID.
+
+### Resolution order
+
+For each tool call:
+1. Exact match in `routes` → use that backend + model
+2. `default_backend` → use that backend's `default_model`
+3. Fallback → Ollama with `OLLAMA_MODEL` env var
+
+### Useful tools
+
+- `local_show_routes` — see current routing config
+- `local_list_models` — list models from all configured backends
+- `local_classify_task` — ask which tool and model best fit a prompt
+- `local_usage_stats` — per-backend usage, cost avoided, cost spent
 
 ## CLI
 
@@ -339,7 +472,11 @@ recorded.
 
 ## Error handling
 
-The server returns actionable error messages instead of raw tracebacks:
+The server returns actionable error messages instead of raw tracebacks.
+All errors inherit from `BackendError`, so you can catch any backend
+failure generically or handle Ollama / OpenRouter errors separately.
+
+**Ollama errors:**
 
 | Failure                 | Error raised              | Message includes                          |
 | ----------------------- | ------------------------- | ----------------------------------------- |
@@ -349,8 +486,19 @@ The server returns actionable error messages instead of raw tracebacks:
 | HTTP 4xx/5xx            | `OllamaServerError`      | Status code + response excerpt            |
 | Garbled JSON            | `OllamaMalformedResponse`| What was expected vs. what arrived        |
 
-All errors are subclasses of `OllamaError` and are logged to the telemetry
-file before propagating to the MCP client.
+**OpenRouter errors:**
+
+| Failure                 | Error raised                  | Message includes                      |
+| ----------------------- | ----------------------------- | ------------------------------------- |
+| Can't reach API         | `OpenRouterConnectionError`   | Check internet connection hint        |
+| Bad or missing API key  | `OpenRouterAuthError`         | Key setup link                        |
+| Rate limited            | `OpenRouterRateLimitError`    | Upgrade plan link                     |
+| Model not available     | `OpenRouterModelNotFound`     | Model name + browse models link       |
+| Request too slow        | `OpenRouterTimeout`           | Timeout duration                      |
+| HTTP 4xx/5xx            | `OpenRouterServerError`       | Status code + response excerpt        |
+
+All errors are logged to the telemetry file before propagating to the
+MCP client.
 
 ## Observability
 
@@ -362,11 +510,11 @@ Every tool call is recorded in two places:
 
 Each record includes:
 
-- `tool`, `ok`, `error?`
+- `tool`, `ok`, `error?`, `backend`
 - `input_chars`, `output_chars`
-- `total_ms` (whole tool call), `wall_ms` (Ollama HTTP), `eval_ms`
-- `prompt_tokens`, `output_tokens` (from Ollama's response metadata)
-- `model`, `ts`
+- `total_ms` (whole tool call), `wall_ms` (HTTP), `eval_ms`
+- `prompt_tokens`, `output_tokens`
+- `model`, `cost` (OpenRouter only, when reported), `ts`
 
 Quick aggregation from the JSON log:
 
@@ -389,13 +537,25 @@ ollama-mcp stats
 ```
 
 ```
-Local calls:   42
+Total calls:   42
 Successful:    40 (95.2%)
 Prompt tokens:  180,000
 Output tokens:  35,000
-Estimated cloud cost avoided:
-  Opus:   $5.3250
-  Sonnet: $1.0650
+
+── ollama ──
+  Calls:       30 (97% success)
+  Avg latency: 1500ms
+  Tokens:      120,000 in / 25,000 out
+  Cost avoided (vs cloud):
+    Opus: $4.6750
+    Sonnet: $0.7350
+
+── openrouter ──
+  Calls:       12 (92% success)
+  Avg latency: 2100ms
+  Tokens:      60,000 in / 10,000 out
+  Cost spent:  $0.001230
+
 Per tool:
   local_summarize: 20 calls, avg 1200ms
   local_review_diff: 12 calls, avg 2100ms

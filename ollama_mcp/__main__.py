@@ -2,7 +2,6 @@
 
 import argparse
 import asyncio
-import sys
 
 from . import mcp
 
@@ -33,6 +32,11 @@ def main():
         help="System prompt to apply to all models",
         default="",
     )
+    bench_parser.add_argument(
+        "-b", "--backend",
+        help="Backend to benchmark against (default: default backend from config)",
+        default="",
+    )
 
     # --- stats ---
     sub.add_parser("stats", help="Show usage statistics and cost avoidance")
@@ -49,6 +53,7 @@ def main():
 
 async def _bench(args):
     from .benchmark import format_results, run_benchmark
+    from .router import get_backends, resolve
 
     prompt = args.prompt
     try:
@@ -64,10 +69,23 @@ async def _bench(args):
         if args.models.strip()
         else None
     )
+
+    backend = None
+    if args.backend.strip():
+        backends = get_backends()
+        name = args.backend.strip()
+        if name not in backends:
+            print(f"Unknown backend '{name}'. Available: {', '.join(sorted(backends))}")
+            return
+        backend = backends[name]
+    else:
+        backend, _ = resolve("local_benchmark")
+
     results = await run_benchmark(
         prompt,
         system=args.system or None,
         models=model_list,
+        backend=backend,
     )
     print(format_results(results))
 

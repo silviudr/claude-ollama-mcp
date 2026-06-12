@@ -2,9 +2,8 @@
 
 from .analyzer import read_csv_meta
 from .benchmark import format_results, run_benchmark
-from .client import generate, generate_json, list_models
 from .privacy import privacy_guard
-from .router import get_routes_info, resolve_model
+from .router import get_backends, get_routes_info, resolve
 from .schemas import AnalysisResult, ReviewResult, TaskClassification
 from .server import mcp
 from .storage import get_stats
@@ -18,9 +17,9 @@ async def local_summarize(text: str) -> str:
     """Summarize a long file, log, or document using a local model.
     Prefer this over reading the whole thing yourself when only the gist is
     needed. Do NOT use for content where exact wording matters."""
-    return await generate(
-        text, system="Summarize concisely. No preamble.",
-        model=resolve_model("local_summarize"),
+    backend, model = resolve("local_summarize")
+    return await backend.generate(
+        text, system="Summarize concisely. No preamble.", model=model,
     )
 
 
@@ -43,10 +42,11 @@ async def local_draft_boilerplate(spec: str) -> str:
       - The output must reference symbols, types, or paths from existing
         project files
       - The "right" structure depends on unstated conventions in this repo"""
-    return await generate(
+    backend, model = resolve("local_draft_boilerplate")
+    return await backend.generate(
         spec,
         system="Output code only. No explanation, no markdown fences.",
-        model=resolve_model("local_draft_boilerplate"),
+        model=model,
     )
 
 
@@ -70,13 +70,14 @@ async def local_implement_small(spec: str) -> str:
       - Correctness requires multi-file reasoning or knowledge of the codebase
 
     Pass a self-contained spec — the local model has no view of the repo."""
-    return await generate(
+    backend, model = resolve("local_implement_small")
+    return await backend.generate(
         spec,
         system=(
             "You are implementing a single small, self-contained piece of code. "
             "Output only the code. No explanation, no markdown fences, no preamble."
         ),
-        model=resolve_model("local_implement_small"),
+        model=model,
     )
 
 
@@ -86,10 +87,11 @@ async def local_implement_small(spec: str) -> str:
 async def local_commit_message(diff: str) -> str:
     """Draft a single conventional-commit subject line from a unified diff.
     Use after staging changes when a quick message is wanted."""
-    return await generate(
+    backend, model = resolve("local_commit_message")
+    return await backend.generate(
         diff,
         system="Write one concise conventional-commit subject. No body unless necessary.",
-        model=resolve_model("local_commit_message"),
+        model=model,
     )
 
 
@@ -130,9 +132,9 @@ async def local_review_diff(diff: str, focus: str = "") -> str:
         f"{focus_instruction}"
     )
 
-    parsed, raw, meta = await generate_json(
-        diff, ReviewResult, system=system,
-        model=resolve_model("local_review_diff"),
+    backend, model = resolve("local_review_diff")
+    parsed, raw, meta = await backend.generate_json(
+        diff, ReviewResult, system=system, model=model,
     )
     if parsed is not None:
         return parsed.format(), meta
@@ -165,7 +167,8 @@ async def local_generate_tests(source: str, context: str = "") -> str:
     if context.strip():
         context_instruction = f"\n\nAdditional context: {context.strip()}"
 
-    return await generate(
+    backend, model = resolve("local_generate_tests")
+    return await backend.generate(
         source,
         system=(
             "You are a test engineer. Given the Python source code, generate "
@@ -180,45 +183,63 @@ async def local_generate_tests(source: str, context: str = "") -> str:
             "- No markdown fences, no explanation — output only valid Python"
             f"{context_instruction}"
         ),
-        model=resolve_model("local_generate_tests"),
+        model=model,
     )
 
 
 @mcp.tool()
 async def local_usage_stats() -> str:
-    """Return usage statistics for all local Ollama tool calls: total calls,
-    success rate, token counts, per-tool breakdown, and estimated cloud cost
-    avoided.
+    """Return usage statistics for all tool calls: total calls,
+    success rate, token counts, per-tool and per-backend breakdown,
+    cost avoided (Ollama) and cost spent (OpenRouter).
 
     Use when:
       - User asks how much local delegation has saved
-      - User wants to see Ollama usage or performance stats
+      - User wants to see usage or performance stats
       - Reporting on local vs. cloud trade-offs"""
     stats = get_stats()
 
     total = stats["total_calls"]
     if total == 0:
-        return "No local tool calls recorded yet."
+        return "No tool calls recorded yet."
 
     ok = stats["successful"]
     rate = ok / total * 100
-    in_tok = stats["total_prompt_tokens"]
-    out_tok = stats["total_output_tokens"]
-    costs = stats["estimated_cost_avoided"]
 
     lines = [
-        f"Local calls:   {total}",
+        f"Total calls:   {total}",
         f"Successful:    {ok} ({rate:.1f}%)",
         f"Failed:        {stats['failed']}",
         f"Avg latency:   {stats['avg_total_ms']}ms",
         "",
-        f"Prompt tokens:  {in_tok:,}",
-        f"Output tokens:  {out_tok:,}",
-        "",
-        "Estimated cloud cost avoided:",
-        f"  Opus:   ${costs['opus']:.4f}",
-        f"  Sonnet: ${costs['sonnet']:.4f}",
+        f"Prompt tokens:  {stats['total_prompt_tokens']:,}",
+        f"Output tokens:  {stats['total_output_tokens']:,}",
     ]
+
+    # Per-backend breakdown
+    per_backend = stats.get("per_backend", {})
+    for name in sorted(per_backend):
+        b = per_backend[name]
+        b_rate = b["successful"] / b["calls"] * 100 if b["calls"] else 0
+        lines += [
+            "",
+            f"── {name} ──",
+            f"  Calls:       {b['calls']} ({b_rate:.0f}% success)",
+            f"  Avg latency: {b['avg_ms']}ms",
+            f"  Tokens:      {b['prompt_tokens']:,} in / {b['output_tokens']:,} out",
+        ]
+        if name == "ollama":
+            avoided = b.get("estimated_cost_avoided", {})
+            if avoided:
+                lines.append("  Cost avoided (vs cloud):")
+                for tier, amount in sorted(avoided.items()):
+                    lines.append(f"    {tier.capitalize()}: ${amount:.4f}")
+        elif name == "openrouter":
+            cost = b.get("total_cost", 0)
+            if cost > 0:
+                lines.append(f"  Cost spent:  ${cost:.6f}")
+            else:
+                lines.append("  Cost spent:  $0 (free models or cost not reported)")
 
     if stats["per_tool"]:
         lines += ["", "Per tool:"]
@@ -262,22 +283,37 @@ async def local_benchmark(prompt: str, system: str = "", models: str = "") -> st
 
 @mcp.tool()
 async def local_list_models() -> str:
-    """List all models currently available in the local Ollama instance.
+    """List all models available across configured backends.
 
     Use when:
       - You need to know which local models are installed
       - Before calling local_benchmark to pick model names
       - User asks what models are available locally"""
-    models = await list_models()
-    if not models:
-        return "No models found. Install one with: ollama pull <model>"
-    return "Available local models:\n" + "\n".join(f"  - {m}" for m in models)
+    backends = get_backends()
+    sections = []
+    for name in sorted(backends):
+        backend = backends[name]
+        try:
+            models = await backend.list_models()
+            if models:
+                header = f"{name} models:"
+                sections.append(
+                    header + "\n" + "\n".join(f"  - {m}" for m in models)
+                )
+            else:
+                sections.append(f"{name}: no models available")
+        except Exception as e:
+            sections.append(f"{name}: error listing models ({e})")
+
+    if not sections:
+        return "No backends configured."
+    return "\n\n".join(sections)
 
 
 @mcp.tool()
 async def local_show_routes() -> str:
-    """Show the current model routing configuration — which model is
-    assigned to which tool.
+    """Show the current model routing configuration — which backend and
+    model is assigned to which tool.
 
     Use when:
       - User asks which model handles which task
@@ -305,7 +341,8 @@ async def local_classify_task(prompt: str) -> str:
         "local_commit_message, local_review_diff, local_generate_tests"
     )
 
-    parsed, raw, meta = await generate_json(
+    backend, model = resolve("local_classify_task")
+    parsed, raw, meta = await backend.generate_json(
         prompt,
         TaskClassification,
         system=(
@@ -321,7 +358,7 @@ async def local_classify_task(prompt: str) -> str:
             "- recommended_model: suggest 'default' unless the task clearly "
             "benefits from a specialized model (e.g. code models for code tasks)"
         ),
-        model=resolve_model("local_classify_task"),
+        model=model,
     )
 
     if parsed is not None:
@@ -386,7 +423,8 @@ async def local_analyze_data(
     if question.strip():
         prompt_parts.append(f"\nSpecific question: {question.strip()}")
 
-    parsed, raw, gen_meta = await generate_json(
+    backend, model = resolve("local_analyze_data")
+    parsed, raw, gen_meta = await backend.generate_json(
         "\n".join(prompt_parts),
         AnalysisResult,
         system=(
@@ -396,7 +434,7 @@ async def local_analyze_data(
             "patterns), row_count, and col_count.\n"
             "Be specific — reference column names and values."
         ),
-        model=resolve_model("local_analyze_data"),
+        model=model,
     )
 
     if parsed is not None:
