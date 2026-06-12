@@ -102,8 +102,8 @@ def test_format_results_empty():
 
 def test_format_results_with_data():
     results = [
-        ModelResult("fast-model", True, "quick answer", 500, 10, 5, 400),
-        ModelResult("slow-model", True, "verbose answer here", 2000, 10, 20, 1800),
+        ModelResult("fast-model", "ollama", True, "quick answer", 500, 10, 5, 400),
+        ModelResult("slow-model", "ollama", True, "verbose answer here", 2000, 10, 20, 1800),
     ]
     text = format_results(results)
     assert "fast-model" in text
@@ -115,8 +115,8 @@ def test_format_results_with_data():
 
 def test_format_results_with_failure():
     results = [
-        ModelResult("good", True, "ok", 500, 10, 5, 400),
-        ModelResult("bad", False, "", 0, 0, 0, 0, error="model not found"),
+        ModelResult("good", "ollama", True, "ok", 500, 10, 5, 400),
+        ModelResult("bad", "ollama", False, "", 0, 0, 0, 0, error="model not found"),
     ]
     text = format_results(results)
     assert "FAIL" in text
@@ -125,9 +125,9 @@ def test_format_results_with_failure():
 
 def test_format_results_sorted_by_latency():
     results = [
-        ModelResult("slow", True, "a", 3000, 10, 5, 2500),
-        ModelResult("fast", True, "b", 500, 10, 5, 400),
-        ModelResult("mid", True, "c", 1500, 10, 5, 1200),
+        ModelResult("slow", "ollama", True, "a", 3000, 10, 5, 2500),
+        ModelResult("fast", "ollama", True, "b", 500, 10, 5, 400),
+        ModelResult("mid", "ollama", True, "c", 1500, 10, 5, 1200),
     ]
     text = format_results(results)
     lines = [l for l in text.split("\n") if l.strip() and not l.startswith("-")]
@@ -136,7 +136,7 @@ def test_format_results_sorted_by_latency():
 
 
 def test_format_results_single_model_no_comparison():
-    results = [ModelResult("only-model", True, "ok", 500, 10, 5, 400)]
+    results = [ModelResult("only-model", "ollama", True, "ok", 500, 10, 5, 400)]
     text = format_results(results)
     assert "only-model" in text
     assert "Fastest:" not in text
