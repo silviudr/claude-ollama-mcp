@@ -35,14 +35,19 @@ claude-ollama-mcp/
 │   ├── client.py         # compatibility shim (delegates to OllamaBackend)
 │   ├── config.py         # env-driven settings
 │   ├── errors.py         # structured error types (Ollama + OpenRouter)
+│   ├── grading/          # async output quality grading framework
+│   │   ├── capacity.py   # Ollama VRAM/model capacity detection
+│   │   ├── engine.py     # async orchestration, sampling, config resolution
+│   │   ├── heuristics.py # zero-cost mechanical checks (AST, format, regex)
+│   │   └── semantic.py   # LLM-based rubric grading via OpenRouter or local
 │   ├── privacy.py        # sensitive content detection and intercept
 │   ├── router.py         # per-tool backend + model routing
 │   ├── schemas.py        # Pydantic models for structured outputs
 │   ├── server.py         # FastMCP instance
-│   ├── storage.py        # SQLite telemetry and cost tracking
+│   ├── storage.py        # SQLite telemetry, cost tracking, and grading storage
 │   ├── telemetry.py      # JSON-lines logging, observed() decorator
 │   └── tools.py          # MCP tool definitions
-├── tests/                # pytest suite (221 tests)
+├── tests/                # pytest suite (310 tests)
 ├── pyproject.toml        # packaging (pip installable)
 ├── requirements.txt      # mcp[cli], httpx
 ├── examples/             # toy project built entirely via local delegation
@@ -68,6 +73,7 @@ claude-ollama-mcp/
 | `local_show_routes`        | Show current model routing configuration                                 |
 | `local_classify_task`      | Classify a prompt and recommend the best tool and model                  |
 | `local_analyze_data`       | Analyze a CSV file — triage locally or hand off to Claude                |
+| `local_grading_report`     | Show quality grades, model scoreboard, and failing checkers              |
 
 Each tool's docstring is what Claude sees. Iterate on the docstrings — that
 is the tuning loop, not the code.
@@ -182,6 +188,13 @@ claude mcp list
 | `OLLAMA_MCP_MAX_COLS` | `20`                                       | Column count threshold for handoff   |
 | `OLLAMA_MCP_COMPLEXITY_THRESHOLD` | `0.7`                          | Complexity score above which to hand off |
 
+**Grading:**
+
+| Var                  | Default                                     | Purpose                              |
+| -------------------- | ------------------------------------------- | ------------------------------------ |
+| `OLLAMA_MCP_GRADING` | `1`                                         | Set to `0` to disable grading        |
+| `OLLAMA_MCP_GRADING_SAMPLE_RATE` | `0.2`                          | Fraction of calls that get semantic grading |
+
 Set these via `--env` at `claude mcp add`, by editing `~/.claude.json`, or
 in `.mcp.json` if registered per-project.
 
@@ -267,6 +280,12 @@ quality-sensitive ones to a stronger cloud model:
     "local_generate_tests": { "backend": "openrouter", "model": "google/gemma-3-27b-it" },
     "local_summarize": "gemma4-32k",
     "local_commit_message": "gemma4-32k"
+  },
+  "grading": {
+    "enabled": true,
+    "backend": "openrouter",
+    "model": "google/gemma-4-31b-it:free",
+    "sample_rate": 0.2
   }
 }
 ```
@@ -437,6 +456,188 @@ Claude should take over for deeper analysis.
 Claude then uses its own reasoning on the metadata and sample — cross-column
 correlations, temporal patterns, causal questions — things a local model
 can't reliably do.
+
+## Output grading
+
+Every tool call is automatically graded in the background — the grading
+never blocks the response to Claude. Grades are stored in SQLite alongside
+telemetry, building a quality dataset that tells you which models produce
+the best output for which tasks.
+
+### How it works
+
+Grading runs in two layers:
+
+1. **Heuristic checks (100% of calls)** — zero-cost mechanical validation
+   that runs instantly after every tool call.
+2. **Semantic LLM grading (sampled, default 20%)** — a rubric-based
+   evaluation sent to OpenRouter (free tier) or a local model.
+
+Both layers run as async fire-and-forget tasks — the tool response is
+returned to Claude immediately, and grading happens in the background.
+
+### Heuristic checks by tool
+
+| Tool                    | Checks                                                                  |
+| ----------------------- | ----------------------------------------------------------------------- |
+| `local_implement_small` | Python AST syntax, hallucinated imports, truncation, repetition         |
+| `local_generate_tests`  | AST syntax, `def test_*` presence, pytest import, **pytest collection** |
+| `local_draft_boilerplate` | Truncation, repetition, **format validation** (Dockerfile/YAML/JSON/Makefile/TOML/INI/.gitignore) |
+| `local_commit_message`  | Non-empty, conventional-commit format                                   |
+| `local_review_diff`     | JSON parseable, truncation, diff file references (phantom file detection) |
+| `local_summarize`       | Non-empty, truncation, repetition                                       |
+| `local_classify_task`   | Non-empty, JSON parseable                                               |
+
+**Test collection** (`local_generate_tests`): the grader writes the
+generated test code and the source code to a temp directory, auto-detects
+the module name from imports, and runs `pytest --collect-only`. This
+catches broken imports, bad fixtures, and mangled signatures that AST
+parsing alone misses.
+
+**Format validation** (`local_draft_boilerplate`): the grader auto-detects
+the output format from the spec keywords (e.g., "Dockerfile", "yaml",
+"Makefile") or from the output content itself, then validates with the
+appropriate parser (`yaml.safe_load`, `json.loads`, `tomllib.loads`,
+Dockerfile instruction check, etc.).
+
+### Semantic grading
+
+When sampled, a grading prompt is sent to the configured grading backend
+with a rubric tailored to the tool type. The rubric scores four dimensions
+(0-5 each):
+
+- **Correctness** — does the output accurately address the input?
+- **Completeness** — are important aspects covered?
+- **Format** — does it follow the expected format?
+- **Conciseness** — appropriately brief without losing meaning?
+
+The grader returns a normalised 0-1 overall score. Scores below 0.5 are
+marked as failures.
+
+### Configuration
+
+Add a `grading` section to `~/.config/ollama_mcp/routes.json`:
+
+```json
+{
+  "default_backend": "ollama",
+  "backends": { ... },
+  "routes": { ... },
+  "grading": {
+    "enabled": true,
+    "backend": "openrouter",
+    "model": "google/gemma-4-31b-it:free",
+    "sample_rate": 0.2
+  }
+}
+```
+
+| Field          | Default                      | Purpose                                |
+| -------------- | ---------------------------- | -------------------------------------- |
+| `enabled`      | `true`                       | Master switch for grading              |
+| `backend`      | `"openrouter"`               | Which backend grades outputs           |
+| `model`        | `"google/gemma-3-27b-it:free"` | Model used for semantic grading      |
+| `sample_rate`  | `0.2`                        | Fraction of calls that get semantic grading (0.0-1.0) |
+
+Environment variables:
+
+| Var                            | Default | Purpose                         |
+| ------------------------------ | ------- | ------------------------------- |
+| `OLLAMA_MCP_GRADING`           | `1`     | Set to `0` to disable grading   |
+| `OLLAMA_MCP_GRADING_SAMPLE_RATE` | `0.2` | Semantic grading sample rate    |
+
+**GPU capacity detection:** if grading is configured for local Ollama, the
+engine queries `/api/ps` on first use to check if a second model can fit
+in VRAM. If it can't (e.g., 2 models already loaded), it logs a warning
+with a suggested config switch to OpenRouter.
+
+### Model scoreboard
+
+The grading data powers a per-model quality ranking. Since grades are
+linked to the `calls` table via `call_id`, you can see which model
+produces the best output per tool:
+
+```
+═══ Grading Report ═══
+
+Total checks:    150
+Passed:          135 (90%)
+Avg score:       0.82
+
+── Model scoreboard (overall) ──
+  🥇 qwen2.5-coder: avg 0.88, 95% pass, 42 checks, 3 tools, avg 1200ms
+  🥈 gemma4-32k:    avg 0.75, 80% pass, 68 checks, 5 tools, avg 2100ms
+  🥉 llama3.2:      avg 0.61, 70% pass, 20 checks, 2 tools, avg 800ms
+
+── Model scores by tool ──
+  local_implement_small:
+    qwen2.5-coder (heuristic): avg 0.95 [0.80–1.00], 100% pass (15)
+    gemma4-32k (heuristic):    avg 0.72 [0.40–1.00], 80% pass (25)
+
+── Top failing checkers ──
+  conventional_commit (local_commit_message): 12 failures
+  json_parseable (local_review_diff): 5 failures
+```
+
+Use `local_grading_report` (MCP tool) or query the database directly:
+
+```bash
+sqlite3 ~/.cache/ollama_mcp.db "\
+  SELECT c.model, g.tool, AVG(g.score) as avg_score, COUNT(*) as checks
+  FROM grades g JOIN calls c ON g.call_id = c.id
+  WHERE g.score IS NOT NULL
+  GROUP BY c.model, g.tool
+  ORDER BY g.tool, avg_score DESC"
+```
+
+### Testing the grader
+
+**Manual heuristic test** — exercises all checkers with known-good and
+known-bad outputs, no Ollama or OpenRouter needed:
+
+```bash
+python3 examples/manual-testing/test_grading.py
+```
+
+Output shows each checker's pass/fail with reasons:
+
+```
+  ✓  local_implement_small — BAD — syntax error
+        ✓ non_empty: score=1.0
+        ✗ python_syntax: score=0.0  ('(' was never closed)
+        ✓ import_check: score=1.0
+
+  ✓  local_draft_boilerplate — BAD — Dockerfile missing FROM
+        ✓ non_empty: score=1.0
+        ✗ format_valid: score=0.0  (Dockerfile missing FROM instruction)
+```
+
+**Live end-to-end test** — use the tools normally and inspect grades:
+
+```bash
+# 1. Enable grading with 100% semantic sampling (for testing)
+# Set "sample_rate": 1.0 in routes.json grading section
+
+# 2. Use any tool via Claude Code
+# "Write a function that validates email addresses"
+# "Generate tests for this module"
+# "Draft a Dockerfile for Python 3.11"
+
+# 3. Check the grades
+sqlite3 ~/.cache/ollama_mcp.db \
+  "SELECT tool, grade_type, checker, passed, score, details
+   FROM grades ORDER BY ts DESC LIMIT 20"
+
+# 4. Or ask Claude: "show me the grading report"
+# (calls local_grading_report)
+```
+
+**Unit tests** — 310 tests covering all grading modules:
+
+```bash
+pytest tests/test_grading_heuristics.py tests/test_grading_engine.py \
+       tests/test_grading_capacity.py tests/test_grading_semantic.py -v
+```
 
 ## Privacy intercept
 
@@ -630,8 +831,11 @@ each feature individually:
 - `sample_sensitive.patch` — diff full of secrets for testing privacy intercept
 - `sample_log.txt` — realistic app log for summarization
 - `sample_routes.json` — routing config ready to copy to `~/.config/ollama_mcp/`
+- `test_grading.py` — 23 test cases exercising all heuristic graders (no Ollama needed)
 
 Quick start: `ollama-mcp bench examples/manual-testing/prompts/code_review.md`
+
+Test the grading checkers: `python3 examples/manual-testing/test_grading.py`
 
 ### Real-world result: hybrid code review
 
