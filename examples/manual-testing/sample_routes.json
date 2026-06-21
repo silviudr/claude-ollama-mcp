@@ -6,5 +6,11 @@
     "local_implement_small": "gemma4-32k",
     "local_summarize": "gemma4-32k",
     "local_classify_task": "gemma4-32k"
+  },
+  "grading": {
+    "enabled": true,
+    "backend": "openrouter",
+    "model": "google/gemma-4-31b-it:free",
+    "sample_rate": 0.2
   }
 }

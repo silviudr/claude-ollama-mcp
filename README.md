@@ -280,6 +280,12 @@ quality-sensitive ones to a stronger cloud model:
     "local_generate_tests": { "backend": "openrouter", "model": "google/gemma-3-27b-it" },
     "local_summarize": "gemma4-32k",
     "local_commit_message": "gemma4-32k"
+  },
+  "grading": {
+    "enabled": true,
+    "backend": "openrouter",
+    "model": "google/gemma-4-31b-it:free",
+    "sample_rate": 0.2
   }
 }
 ```
