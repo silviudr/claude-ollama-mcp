@@ -16,10 +16,11 @@ logger.addHandler(_handler)
 logger.propagate = False
 
 
-def record(event: dict) -> None:
+def record(event: dict) -> int:
+    """Record a telemetry event and return the call row id."""
     event["ts"] = time.time()
     logger.info(json.dumps(event))
-    log_call(event)
+    return log_call(event)
 
 
 def observed(tool_name: str):
@@ -29,18 +30,43 @@ def observed(tool_name: str):
             t0 = time.perf_counter()
             try:
                 text, meta = await fn(*args, **kwargs)
-                record(
+                input_text = " ".join(
+                    str(v) for v in list(args) + list(kwargs.values())
+                )
+                call_id = record(
                     {
                         "tool": tool_name,
                         "ok": True,
-                        "input_chars": sum(
-                            len(str(v)) for v in list(args) + list(kwargs.values())
-                        ),
+                        "input_chars": len(input_text),
                         "output_chars": len(text),
                         "total_ms": int((time.perf_counter() - t0) * 1000),
                         **meta,
                     }
                 )
+
+                from .grading import schedule_grading
+                from .grading.heuristics import run_heuristics
+
+                schedule_grading(tool_name, input_text, text, call_id)
+
+                failures = [
+                    r for r in run_heuristics(tool_name, input_text, text)
+                    if not r["passed"]
+                ]
+                if failures:
+                    warnings = "\n".join(
+                        f"  - {r['checker']}: {r['details'].get('reason', 'failed')}"
+                        for r in failures
+                    )
+                    text += (
+                        f"\n\n"
+                        f"IMPORTANT — Quality warning: the model output failed "
+                        f"{len(failures)} automated quality check{'s' if len(failures) != 1 else ''}. "
+                        f"Please inform the user about these issues:\n"
+                        f"{warnings}\n"
+                        f"The user should be aware that this output may need corrections."
+                    )
+
                 return text
             except Exception as e:
                 record(

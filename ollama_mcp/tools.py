@@ -6,7 +6,7 @@ from .privacy import privacy_guard
 from .router import get_backends, get_routes_info, resolve
 from .schemas import AnalysisResult, ReviewResult, TaskClassification
 from .server import mcp
-from .storage import get_stats
+from .storage import get_grading_report, get_stats
 from .telemetry import observed
 
 
@@ -248,6 +248,141 @@ async def local_usage_stats() -> str:
                 f"  {t['tool']}: {t['calls']} calls, "
                 f"{t['prompt_tokens']:,}+{t['output_tokens']:,} tok, "
                 f"avg {t['avg_ms']}ms"
+            )
+
+    grading = stats.get("grading", {})
+    if grading:
+        lines += ["", "Grading:"]
+        for tool in sorted(grading):
+            for gtype, g in sorted(grading[tool].items()):
+                pass_rate = g["passed"] / g["total"] * 100 if g["total"] else 0
+                lines.append(
+                    f"  {tool} ({gtype}): {g['total']} checks, "
+                    f"{pass_rate:.0f}% pass, avg score {g['avg_score']:.2f}"
+                )
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def local_grading_report(tool: str = "") -> str:
+    """Show a detailed grading quality report for local model outputs.
+    Includes per-tool pass rates, top failing checkers, semantic score
+    distributions, and recent failures with details.
+
+    Use when:
+      - User asks "how are the grades looking?" or "what's the quality?"
+      - Investigating which tools or models produce low-quality output
+      - Deciding whether to adjust routing or model selection
+      - Reviewing grading trends before enabling adaptive routing
+
+    Args:
+        tool: Optional tool name to filter by (e.g. "local_implement_small").
+              If empty, shows report across all tools."""
+    report = get_grading_report(tool=tool)
+
+    s = report["summary"]
+    if s["total_checks"] == 0:
+        msg = "No grading data yet."
+        if tool:
+            msg += f" (filtered by {tool})"
+        msg += " Use the local_* tools to generate data — grading runs automatically."
+        return msg
+
+    pass_rate = s["passed"] / s["total_checks"] * 100 if s["total_checks"] else 0
+
+    lines = ["═══ Grading Report ═══"]
+    if tool:
+        lines.append(f"Filter: {tool}")
+    lines += [
+        "",
+        f"Total checks:    {s['total_checks']}",
+        f"Passed:          {s['passed']} ({pass_rate:.0f}%)",
+        f"Failed:          {s['failed']}",
+        f"Avg score:       {s['avg_score']:.2f}",
+        f"Calls graded:    {s['calls_graded']}",
+    ]
+
+    # Per-tool breakdown
+    if report["breakdown"]:
+        lines += ["", "── Per-tool breakdown ──"]
+        current_tool = None
+        for b in report["breakdown"]:
+            if b["tool"] != current_tool:
+                current_tool = b["tool"]
+                lines.append(f"\n  {current_tool}:")
+            b_rate = b["passed"] / b["total"] * 100 if b["total"] else 0
+            extra = ""
+            if b["grade_type"] == "semantic" and b["avg_grader_ms"]:
+                extra = f", avg {b['avg_grader_ms']}ms"
+            lines.append(
+                f"    {b['grade_type']}: {b['total']} checks, "
+                f"{b_rate:.0f}% pass, avg score {b['avg_score']:.2f}{extra}"
+            )
+
+    # Top failing checkers
+    if report["top_failures"]:
+        lines += ["", "── Top failing checkers ──"]
+        for f in report["top_failures"]:
+            lines.append(f"  {f['checker']} ({f['tool']}): {f['fail_count']} failures")
+
+    # Semantic score distribution
+    if report["semantic_scores"]:
+        lines += ["", "── Semantic scores by tool ──"]
+        for sc in report["semantic_scores"]:
+            lines.append(
+                f"  {sc['tool']}: "
+                f"avg {sc['avg_score']:.2f}, "
+                f"min {sc['min_score']:.2f}, "
+                f"max {sc['max_score']:.2f} "
+                f"({sc['count']} graded)"
+            )
+
+    # Model ranking (overall)
+    if report["model_ranking"]:
+        lines += ["", "── Model scoreboard (overall) ──"]
+        for i, mr in enumerate(report["model_ranking"]):
+            mr_rate = mr["passed"] / mr["total"] * 100 if mr["total"] else 0
+            medal = ["🥇", "🥈", "🥉"][i] if i < 3 else "  "
+            lines.append(
+                f"  {medal} {mr['model']}: "
+                f"avg {mr['avg_score']:.2f}, "
+                f"{mr_rate:.0f}% pass, "
+                f"{mr['total']} checks, "
+                f"{mr['tools_used']} tools, "
+                f"avg {mr['avg_latency_ms']}ms"
+            )
+
+    # Per-model per-tool breakdown
+    if report["model_scores"]:
+        lines += ["", "── Model scores by tool ──"]
+        current_tool = None
+        for ms in report["model_scores"]:
+            if ms["tool"] != current_tool:
+                current_tool = ms["tool"]
+                lines.append(f"\n  {current_tool}:")
+            ms_rate = ms["passed"] / ms["total"] * 100 if ms["total"] else 0
+            lines.append(
+                f"    {ms['model']} ({ms['grade_type']}): "
+                f"avg {ms['avg_score']:.2f} "
+                f"[{ms['min_score']:.2f}–{ms['max_score']:.2f}], "
+                f"{ms_rate:.0f}% pass ({ms['total']})"
+            )
+
+    # Recent failures
+    if report["recent_failures"]:
+        lines += ["", "── Recent failures (newest first) ──"]
+        for rf in report["recent_failures"][:10]:
+            detail_str = ""
+            if rf["details"]:
+                reason = rf["details"].get("reason", "")
+                if reason:
+                    detail_str = f" — {reason}"
+                elif "error" in rf["details"]:
+                    detail_str = f" — {rf['details']['error']}"
+            lines.append(
+                f"  [{rf['grade_type']}] {rf['tool']} / {rf['checker']}"
+                f"{detail_str}"
             )
 
     return "\n".join(lines)
