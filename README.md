@@ -47,7 +47,7 @@ claude-ollama-mcp/
 │   ├── storage.py        # SQLite telemetry, cost tracking, and grading storage
 │   ├── telemetry.py      # JSON-lines logging, observed() decorator
 │   └── tools.py          # MCP tool definitions
-├── tests/                # pytest suite (310 tests)
+├── tests/                # pytest suite (334 tests)
 ├── pyproject.toml        # packaging (pip installable)
 ├── requirements.txt      # mcp[cli], httpx
 ├── examples/             # toy project built entirely via local delegation
@@ -638,6 +638,110 @@ sqlite3 ~/.cache/ollama_mcp.db \
 pytest tests/test_grading_heuristics.py tests/test_grading_engine.py \
        tests/test_grading_capacity.py tests/test_grading_semantic.py -v
 ```
+
+## Adaptive routing
+
+Static routes pick one model per tool forever. Adaptive routing learns from
+grading data and automatically promotes the best-performing model for each
+tool — no manual tuning needed.
+
+### How it works
+
+Adaptive routing uses **epsilon-greedy selection with a recency window**:
+
+1. **Exploit** (default 90%) — pick the candidate model with the highest
+   combined score for the tool.
+2. **Explore** (default 10%) — pick a random alternative to gather fresh
+   data and detect improvements.
+
+The combined score balances quality and speed:
+
+```
+combined = quality_weight × avg_quality_score + (1 - quality_weight) × (1 / avg_latency)
+```
+
+Only the most recent N graded calls count (the **recency window**), so if
+you pull a new model version the old scores fade away naturally.
+
+### Setup
+
+Add an `adaptive` section to `~/.config/ollama_mcp/routes.json`:
+
+```json
+{
+  "adaptive": {
+    "enabled": true,
+    "min_samples": 10,
+    "quality_weight": 0.7,
+    "explore_rate": 0.1,
+    "recency_window": 100,
+    "candidates": {
+      "local_summarize": ["gemma4-32k", "openrouter/google/gemma-4-31b-it:free"],
+      "local_implement_small": ["gemma4-32k", "qwen3:8b"],
+      "local_review_diff": ["gemma4-32k", "deepseek-coder"]
+    }
+  }
+}
+```
+
+**Candidate format:** bare model names (e.g. `"gemma4-32k"`) use the
+default backend. Prefixed names (e.g. `"openrouter/google/gemma-4-31b-it:free"`)
+route to the named backend.
+
+Tools not listed in `candidates` use their static route as before —
+adaptive routing only applies to tools you explicitly opt in.
+
+### Configuration reference
+
+| Key              | Default | Description                                        |
+|------------------|---------|----------------------------------------------------|
+| `enabled`        | `false` | Master switch for adaptive routing                 |
+| `min_samples`    | `10`    | Minimum graded calls before a model is eligible    |
+| `quality_weight` | `0.7`   | Weight for quality vs speed (0.0–1.0)              |
+| `explore_rate`   | `0.1`   | Fraction of calls that explore non-best models     |
+| `recency_window` | `100`   | Only consider the N most recent grades per model   |
+| `candidates`     | `{}`    | Map of tool name → list of candidate model strings |
+
+### Cold start and fallback
+
+Until a tool's candidates accumulate `min_samples` graded calls, adaptive
+routing falls back to the static route in `routes`. This means:
+
+- **Fresh install:** everything works exactly as before — no adaptive
+  behavior until grading data exists.
+- **New model added:** add it to `candidates` and it will receive
+  `explore_rate` traffic until it builds enough data to compete.
+
+### Monitoring
+
+Call `local_show_routes` to see adaptive state alongside static config:
+
+```
+Adaptive routing: enabled
+  explore_rate: 0.1, quality_weight: 0.7, min_samples: 10, recency_window: 100
+  local_implement_small:
+    gemma4-32k: score 1.00, latency 6625ms, combined 0.700 (20 samples)
+    qwen3:8b: score 0.95, latency 1200ms, combined 0.668 (15 samples)
+  local_summarize:
+    gemma4-32k: score 0.98, latency 7400ms, combined 0.686 (12 samples)
+    openrouter/google/gemma-4-31b-it:free: warming up (4/10 samples)
+```
+
+Models still warming up show their progress toward `min_samples`. Models
+with no grading data show "no data yet".
+
+### Tips
+
+- **For testing**, set `min_samples: 2` and `explore_rate: 0.5` so both
+  candidates get traffic quickly. Reset to production values afterward.
+- **Grading must be enabled** (`grading.enabled: true` in routes.json)
+  for adaptive routing to collect scores. Without grading data, candidates
+  never reach `min_samples` and the router stays on static routes.
+- **Raise `quality_weight`** (toward 1.0) if you care more about output
+  quality than speed. Lower it if latency matters more.
+- **Pinned routes** are not overridden — if a tool has a static route and
+  is not listed in `candidates`, adaptive routing ignores it.
+
 
 ## Privacy intercept
 

@@ -158,3 +158,80 @@ def test_openrouter_cost_aggregation():
 def test_empty_db_has_no_per_backend():
     stats = storage.get_stats()
     assert stats["per_backend"] == {}
+
+
+# --- get_model_scores ---
+
+
+def _seed_graded_calls(tool, model, scores, base_ts=None):
+    """Insert call+grade pairs and return call_ids."""
+    if base_ts is None:
+        base_ts = time.time()
+    for i, score in enumerate(scores):
+        call_id = storage.log_call(_make_event(
+            tool=tool, model=model, ts=base_ts + i,
+        ))
+        storage.log_grade({
+            "ts": base_ts + i,
+            "call_id": call_id,
+            "tool": tool,
+            "grade_type": "semantic",
+            "checker": "overall",
+            "score": score,
+            "passed": score >= 0.5,
+            "details": None,
+            "grader_model": "judge",
+            "grader_backend": "openrouter",
+            "grader_ms": 100,
+        })
+
+
+def test_get_model_scores_basic():
+    _seed_graded_calls("local_summarize", "gemma4-32k", [0.8, 0.9, 0.7])
+    result = storage.get_model_scores("local_summarize", ["gemma4-32k"])
+    assert len(result) == 1
+    assert result[0]["model"] == "gemma4-32k"
+    assert result[0]["avg_score"] == pytest.approx(0.8, abs=0.01)
+    assert result[0]["sample_count"] == 3
+
+
+def test_get_model_scores_multiple_models():
+    _seed_graded_calls("local_summarize", "gemma4-32k", [0.8, 0.9])
+    _seed_graded_calls("local_summarize", "llama3.1", [0.6, 0.7])
+    result = storage.get_model_scores("local_summarize", ["gemma4-32k", "llama3.1"])
+    assert len(result) == 2
+    assert result[0]["model"] == "gemma4-32k"
+    assert result[1]["model"] == "llama3.1"
+
+
+def test_get_model_scores_filters_by_tool():
+    _seed_graded_calls("local_summarize", "gemma4-32k", [0.9])
+    _seed_graded_calls("local_review_diff", "gemma4-32k", [0.5])
+    result = storage.get_model_scores("local_summarize", ["gemma4-32k"])
+    assert len(result) == 1
+    assert result[0]["avg_score"] == pytest.approx(0.9, abs=0.01)
+
+
+def test_get_model_scores_recency_window():
+    ts = time.time()
+    _seed_graded_calls("local_summarize", "gemma4-32k",
+                       [0.3, 0.3, 0.3, 0.9, 0.9], base_ts=ts)
+    result_all = storage.get_model_scores(
+        "local_summarize", ["gemma4-32k"], recency_window=100,
+    )
+    result_recent = storage.get_model_scores(
+        "local_summarize", ["gemma4-32k"], recency_window=2,
+    )
+    assert result_all[0]["sample_count"] == 5
+    assert result_recent[0]["sample_count"] == 2
+    assert result_recent[0]["avg_score"] > result_all[0]["avg_score"]
+
+
+def test_get_model_scores_empty_candidates():
+    result = storage.get_model_scores("local_summarize", [])
+    assert result == []
+
+
+def test_get_model_scores_no_data():
+    result = storage.get_model_scores("local_summarize", ["nonexistent"])
+    assert result == []
