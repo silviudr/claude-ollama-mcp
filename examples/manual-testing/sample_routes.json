@@ -12,5 +12,17 @@
     "backend": "openrouter",
     "model": "google/gemma-4-31b-it:free",
     "sample_rate": 0.2
+  },
+  "adaptive": {
+    "enabled": true,
+    "min_samples": 10,
+    "quality_weight": 0.7,
+    "explore_rate": 0.1,
+    "recency_window": 100,
+    "candidates": {
+      "local_summarize": ["gemma4-32k", "llama3.1"],
+      "local_review_diff": ["gemma4-32k", "deepseek-coder"],
+      "local_implement_small": ["gemma4-32k", "qwen2.5-coder"]
+    }
   }
 }

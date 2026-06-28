@@ -236,6 +236,50 @@ def get_stats() -> dict:
     return stats
 
 
+def get_model_scores(tool: str, candidates: list[str],
+                     recency_window: int = 100) -> list[dict]:
+    """Return avg quality score and latency for candidate models on a tool.
+
+    Only considers the most recent `recency_window` graded calls per model.
+    Returns a list of dicts with: model, avg_score, avg_latency_ms, sample_count.
+    """
+    conn = _conn()
+    conn.row_factory = sqlite3.Row
+
+    if not candidates:
+        return []
+
+    placeholders = ",".join("?" for _ in candidates)
+    rows = conn.execute(
+        f"""\
+        WITH recent AS (
+            SELECT c.model,
+                   g.score,
+                   c.total_ms,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY c.model ORDER BY g.ts DESC
+                   ) AS rn
+            FROM grades g
+            JOIN calls c ON g.call_id = c.id
+            WHERE g.tool = ?
+              AND c.model IN ({placeholders})
+              AND g.score IS NOT NULL
+              AND c.ok = 1
+        )
+        SELECT model,
+               AVG(score)                              AS avg_score,
+               COALESCE(CAST(AVG(total_ms) AS INT), 0) AS avg_latency_ms,
+               COUNT(*)                                 AS sample_count
+        FROM recent
+        WHERE rn <= ?
+        GROUP BY model
+        ORDER BY avg_score DESC""",
+        (tool, *candidates, recency_window),
+    ).fetchall()
+
+    return [dict(r) for r in rows]
+
+
 def get_grading_report(tool: str = "", limit: int = 50) -> dict:
     """Detailed grading report for observability.
 
