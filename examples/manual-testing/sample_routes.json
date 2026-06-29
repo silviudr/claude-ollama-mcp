@@ -11,7 +11,11 @@
     "enabled": true,
     "backend": "openrouter",
     "model": "google/gemma-4-31b-it:free",
-    "sample_rate": 0.2
+    "sample_rate": 0.2,
+    "tool_sample_rates": {
+      "local_review_diff": 1.0,
+      "local_implement_small": 1.0
+    }
   },
   "adaptive": {
     "enabled": true,

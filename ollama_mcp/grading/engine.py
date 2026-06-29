@@ -115,7 +115,8 @@ async def _grade(
     if not enabled:
         return
 
-    sample_rate = config.get("sample_rate", GRADING_SAMPLE_RATE)
+    per_tool = config.get("tool_sample_rates", {})
+    sample_rate = per_tool.get(tool_name, config.get("sample_rate", GRADING_SAMPLE_RATE))
 
     await _check_capacity_once(config)
 
