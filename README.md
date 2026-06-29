@@ -527,17 +527,29 @@ Add a `grading` section to `~/.config/ollama_mcp/routes.json`:
     "enabled": true,
     "backend": "openrouter",
     "model": "google/gemma-4-31b-it:free",
-    "sample_rate": 0.2
+    "sample_rate": 0.2,
+    "tool_sample_rates": {
+      "local_review_diff": 1.0,
+      "local_implement_small": 1.0,
+      "local_generate_tests": 0.5
+    }
   }
 }
 ```
 
-| Field          | Default                      | Purpose                                |
-| -------------- | ---------------------------- | -------------------------------------- |
-| `enabled`      | `true`                       | Master switch for grading              |
-| `backend`      | `"openrouter"`               | Which backend grades outputs           |
-| `model`        | `"google/gemma-3-27b-it:free"` | Model used for semantic grading      |
-| `sample_rate`  | `0.2`                        | Fraction of calls that get semantic grading (0.0-1.0) |
+| Field                | Default                      | Purpose                                |
+| -------------------- | ---------------------------- | -------------------------------------- |
+| `enabled`            | `true`                       | Master switch for grading              |
+| `backend`            | `"openrouter"`               | Which backend grades outputs           |
+| `model`              | `"google/gemma-3-27b-it:free"` | Model used for semantic grading      |
+| `sample_rate`        | `0.2`                        | Default fraction of calls that get semantic grading (0.0-1.0) |
+| `tool_sample_rates`  | `{}`                         | Per-tool overrides for `sample_rate` — tools not listed use the global rate |
+
+Per-tool sample rates let you run 100% grading on critical tools (like
+code review) where quality signal matters most, while keeping low-stakes
+tools (like commit messages) at the default rate. This is especially
+useful for **adaptive routing** — higher sample rates on tools with
+candidates mean faster convergence on model rankings.
 
 Environment variables:
 
