@@ -40,8 +40,11 @@ async def local_draft_boilerplate(spec: str) -> str:
 
     Do NOT use when:
       - The output must reference symbols, types, or paths from existing
-        project files
-      - The "right" structure depends on unstated conventions in this repo"""
+        project files, UNLESS you paste those symbols/types/paths into the
+        spec — then delegate anyway
+      - The "right" structure depends on unstated conventions in this repo
+        (if you can state the convention in the spec, it's no longer
+        unstated — delegate)"""
     backend, model = resolve("local_draft_boilerplate")
     return await backend.generate(
         spec,
@@ -64,12 +67,18 @@ async def local_implement_small(spec: str) -> str:
       - The result does NOT need to call into existing project code
 
     Do NOT use when:
-      - The implementation must import from or match existing repo modules
+      - The implementation must import from or match existing repo modules,
+        UNLESS you paste the relevant interface/signature into the spec —
+        then delegate anyway
       - Behavior depends on details not in the prompt (config, schemas,
-        project conventions)
-      - Correctness requires multi-file reasoning or knowledge of the codebase
+        project conventions) — paste those details in and delegate instead
+        of skipping
+      - Correctness requires holding a design/security invariant across
+        multiple files at once (genuinely non-delegable, not just missing
+        context)
 
-    Pass a self-contained spec — the local model has no view of the repo."""
+    Pass a self-contained spec — the local model has no view of the repo,
+    so any repo context it needs must be pasted into the spec."""
     backend, model = resolve("local_implement_small")
     return await backend.generate(
         spec,
@@ -109,8 +118,11 @@ async def local_review_diff(diff: str, focus: str = "") -> str:
       - Screening code that does not require deep repo context
 
     Do NOT use when:
-      - The review requires understanding cross-file dependencies
+      - The review requires understanding cross-file dependencies, UNLESS
+        you include the relevant related code in the diff/content — then
+        delegate anyway
       - Correctness depends on project conventions, configs, or schemas
+        that aren't included — include them and delegate instead of skipping
       - The diff is very large (>500 lines) — split it first
 
     Args:
@@ -155,7 +167,9 @@ async def local_generate_tests(source: str, context: str = "") -> str:
       - The code is self-contained enough to test without complex fixtures
 
     Do NOT use when:
-      - The code under test has deep dependencies on other project modules
+      - The code under test has deep dependencies on other project modules,
+        UNLESS you describe those dependencies via the `context` arg — then
+        delegate anyway
       - Tests need database fixtures, network mocks, or complex setup
       - The file is mostly imports/glue with no testable logic
 
@@ -488,8 +502,13 @@ async def local_classify_task(prompt: str) -> str:
             "Guidelines:\n"
             "- task_type: summarize, code, review, test, explain, boilerplate, or other\n"
             "- risk: low (simple/mechanical), medium (needs care), high (complex/critical)\n"
-            "- should_use_local: false if the task needs cross-file reasoning, "
-            "repo context, or high accuracy on critical code\n"
+            "- should_use_local: false only if the task requires holding a "
+            "design/security invariant across multiple files at once (e.g. a "
+            "data-handling boundary), or needs high accuracy on critical code. "
+            "If it only *looks* cross-file because it needs a schema, "
+            "convention, or interface that could simply be pasted into the "
+            "prompt, still recommend true — note in reasoning what context "
+            "must be included\n"
             "- recommended_model: suggest 'default' unless the task clearly "
             "benefits from a specialized model (e.g. code models for code tasks)"
         ),
