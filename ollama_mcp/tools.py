@@ -3,10 +3,19 @@
 from .analyzer import read_csv_meta
 from .benchmark import format_results, run_benchmark
 from .privacy import privacy_guard
-from .router import get_backends, get_routes_info, resolve
-from .schemas import AnalysisResult, ReviewResult, TaskClassification
+from .router import (
+    get_backends,
+    get_routes_info,
+    get_swarm_concurrency,
+    resolve,
+    resolve_candidate_list,
+    resolve_swarm_candidates,
+    resolve_swarm_dimensions,
+)
+from .schemas import AnalysisResult, ReviewResult, TaskClassification, merge_review_results
 from .server import mcp
 from .storage import get_grading_report, get_stats
+from .swarm import SwarmTask, combine_meta, format_consensus, run_swarm
 from .telemetry import observed
 
 
@@ -104,6 +113,16 @@ async def local_commit_message(diff: str) -> str:
     )
 
 
+_REVIEW_BASE_SYSTEM = (
+    "You are a code reviewer. Analyze the provided diff or code.\n"
+    "Return your review as JSON with a 'findings' array and a 'summary' string.\n"
+    "Each finding has: severity (HIGH/MEDIUM/LOW), category "
+    "(BUG/SECURITY/PERFORMANCE/COMPLEXITY/STYLE/MISSING_TEST/RISKY_ASSUMPTION), "
+    "message, and optionally file and line.\n"
+    "If the code looks clean, return an empty findings array."
+)
+
+
 @mcp.tool()
 @observed("local_review_diff")
 @privacy_guard
@@ -111,6 +130,13 @@ async def local_review_diff(diff: str, focus: str = "") -> str:
     """Review a code diff or file content for issues. Returns a structured
     list of findings covering: bugs, security concerns, risky assumptions,
     missing tests, and complexity issues.
+
+    When routes.json configures swarm.review_dimensions for this tool (and
+    swarm.enabled is not false), the review fans out to one concurrent call
+    per dimension (e.g. security, performance, correctness, tests — each
+    optionally a different model) and merges the findings. Without that
+    config, or with swarms disabled, this makes a single call exactly as
+    before.
 
     Use when:
       - User asks to review a diff, patch, or file for quality
@@ -127,30 +153,60 @@ async def local_review_diff(diff: str, focus: str = "") -> str:
 
     Args:
         diff: The unified diff or file content to review.
-        focus: Optional comma-separated focus areas to prioritize, e.g.
+        focus: Optional comma-separated areas to prioritize, e.g.
                "security,performance". When empty, all categories are
-               covered equally."""
-    focus_instruction = ""
+               covered equally. If swarm.review_dimensions is configured,
+               this instead filters which configured dimensions run (falls
+               back to running all of them if nothing matches)."""
+    dims = resolve_swarm_dimensions("local_review_diff")
+
+    if not dims:
+        focus_instruction = f" Focus especially on: {focus.strip()}." if focus.strip() else ""
+        backend, model = resolve("local_review_diff")
+        parsed, raw, meta = await backend.generate_json(
+            diff, ReviewResult, system=_REVIEW_BASE_SYSTEM + focus_instruction, model=model,
+        )
+        if parsed is not None:
+            return parsed.format(), meta
+        return raw, meta
+
+    selected = dims
     if focus.strip():
-        focus_instruction = f" Focus especially on: {focus.strip()}."
+        # Exact match against configured dimension names — substring matching
+        # here would false-positive on short names (e.g. a "test" dimension
+        # matching the word "fastest").
+        tokens = {t.strip().lower() for t in focus.split(",") if t.strip()}
+        matched = {
+            name: be_model for name, be_model in dims.items()
+            if name.lower() in tokens
+        }
+        if matched:
+            selected = matched
 
-    system = (
-        "You are a code reviewer. Analyze the provided diff or code.\n"
-        "Return your review as JSON with a 'findings' array and a 'summary' string.\n"
-        "Each finding has: severity (HIGH/MEDIUM/LOW), category "
-        "(BUG/SECURITY/PERFORMANCE/COMPLEXITY/STYLE/MISSING_TEST/RISKY_ASSUMPTION), "
-        "message, and optionally file and line.\n"
-        "If the code looks clean, return an empty findings array."
-        f"{focus_instruction}"
+    tasks = [
+        SwarmTask(
+            key=name,
+            backend=be,
+            model=model,
+            prompt=diff,
+            system=(
+                _REVIEW_BASE_SYSTEM
+                + f" Focus exclusively on {name} issues — ignore other categories."
+            ),
+            schema=ReviewResult,
+        )
+        for name, (be, model) in selected.items()
+    ]
+    results = await run_swarm(
+        tasks, tool_name="local_review_diff", concurrency=get_swarm_concurrency(),
     )
 
-    backend, model = resolve("local_review_diff")
-    parsed, raw, meta = await backend.generate_json(
-        diff, ReviewResult, system=system, model=model,
-    )
-    if parsed is not None:
-        return parsed.format(), meta
-    return raw, meta
+    labeled = [
+        (r.key, r.parsed, r.success, r.text if r.success else r.error)
+        for r in results
+    ]
+    merged = merge_review_results(labeled)
+    return merged.format(), combine_meta(results)
 
 
 @mcp.tool()
@@ -428,6 +484,69 @@ async def local_benchmark(prompt: str, system: str = "", models: str = "") -> st
         models=model_list,
     )
     return format_results(results)
+
+
+@mcp.tool()
+@observed("local_consensus")
+@privacy_guard
+async def local_consensus(prompt: str, system: str = "", models: str = "") -> str:
+    """Run the same prompt against multiple models concurrently and report
+    agreement/disagreement — not just a side-by-side comparison table like
+    local_benchmark. Useful when you want a second (and third) opinion, not
+    just to compare speed.
+
+    Use when:
+      - A single model's answer feels uncertain and cross-checking against
+        others would help
+      - Deciding which model to trust for a class of prompts
+      - User explicitly asks to compare model answers, not just latency
+
+    Do NOT use when:
+      - No candidate models are configured or supplied — this tool needs at
+        least two model targets to say anything about agreement
+      - The prompt/task is unambiguous and one good local model already
+        handles it well — this multiplies cost for no benefit
+
+    Args:
+        prompt: The prompt to send to each candidate model.
+        system: Optional system prompt applied to all candidates.
+        models: Optional comma-separated model list (bare names use the
+                default backend, "backend/model" targets a named backend).
+                If empty, uses swarm.consensus_candidates.local_consensus
+                from routes.json. An explicit list works even when
+                swarm.enabled is false."""
+    if models.strip():
+        candidates = resolve_candidate_list(
+            [m.strip() for m in models.split(",") if m.strip()]
+        )
+    else:
+        candidates = resolve_swarm_candidates("local_consensus")
+
+    if not candidates:
+        # Two distinct causes land here — say which, so the fix isn't a guess.
+        from .router import is_swarm_configured_but_disabled
+
+        if is_swarm_configured_but_disabled():
+            return (
+                "Agent swarms are disabled (swarm.enabled is false in "
+                "routes.json). Set it to true to use configured consensus "
+                'candidates, or pass models="model1,model2" to run this call '
+                "regardless."
+            ), {"model": "none", "wall_ms": 0}
+        return (
+            "No consensus candidates configured for local_consensus. "
+            "Add swarm.consensus_candidates.local_consensus to routes.json, "
+            'or pass models="model1,model2".'
+        ), {"model": "none", "wall_ms": 0}
+
+    tasks = [
+        SwarmTask(key=label, backend=be, model=model, prompt=prompt, system=system or None)
+        for label, be, model in candidates
+    ]
+    results = await run_swarm(
+        tasks, tool_name="local_consensus", concurrency=get_swarm_concurrency(),
+    )
+    return format_consensus(results), combine_meta(results)
 
 
 @mcp.tool()

@@ -380,3 +380,17 @@ class TestRunHeuristics:
         results = run_heuristics("unknown_tool", "in", "out")
         assert len(results) >= 1
         assert results[0]["checker"] == "non_empty"
+
+    def test_synthetic_swarm_tool_name_resolves_to_base_tool_checkers(self):
+        """A swarm sub-task tool name like "local_review_diff:security" must
+        get the same checkers as "local_review_diff", not fall back to just
+        check_non_empty."""
+        output = json.dumps({"findings": [], "summary": "Clean"})
+        base_results = run_heuristics("local_review_diff", "diff content", output)
+        synthetic_results = run_heuristics("local_review_diff:security", "diff content", output)
+
+        base_checkers = {r["checker"] for r in base_results}
+        synthetic_checkers = {r["checker"] for r in synthetic_results}
+        assert synthetic_checkers == base_checkers
+        assert "json_parseable" in synthetic_checkers
+        assert "diff_references" in synthetic_checkers

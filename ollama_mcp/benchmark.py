@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .backends import Backend
+from .swarm import SwarmTask, run_swarm
 
 
 @dataclass
@@ -43,34 +44,31 @@ async def run_benchmark(
             models = await backend.list_models()
         targets = [(backend, m) for m in models]
 
-    results: list[ModelResult] = []
-    for be, model in targets:
-        try:
-            text, meta = await be.generate(prompt, system=system, model=model)
-            results.append(ModelResult(
-                model=model,
-                backend=be.name,
-                success=True,
-                response=text,
-                wall_ms=meta.get("wall_ms", 0),
-                prompt_tokens=meta.get("prompt_tokens") or 0,
-                output_tokens=meta.get("output_tokens") or 0,
-                eval_ms=meta.get("eval_ms", 0),
-            ))
-        except Exception as e:
-            results.append(ModelResult(
-                model=model,
-                backend=be.name,
-                success=False,
-                response="",
-                wall_ms=0,
-                prompt_tokens=0,
-                output_tokens=0,
-                eval_ms=0,
-                error=str(e),
-            ))
+    from .router import get_swarm_concurrency
 
-    return results
+    tasks = [
+        SwarmTask(key=model, backend=be, model=model, prompt=prompt, system=system)
+        for be, model in targets
+    ]
+    # No tool_name: benchmarking is a side-effect-free comparison, not a
+    # judged tool call — it must not trigger telemetry/grading per model
+    # (that would silently multiply grading cost by the number of models).
+    swarm_results = await run_swarm(tasks, concurrency=get_swarm_concurrency())
+
+    return [
+        ModelResult(
+            model=r.model,
+            backend=r.backend,
+            success=r.success,
+            response=r.text,
+            wall_ms=r.meta.get("wall_ms", 0),
+            prompt_tokens=r.meta.get("prompt_tokens") or 0,
+            output_tokens=r.meta.get("output_tokens") or 0,
+            eval_ms=r.meta.get("eval_ms", 0),
+            error=r.error,
+        )
+        for r in swarm_results
+    ]
 
 
 def format_results(results: list[ModelResult]) -> str:
