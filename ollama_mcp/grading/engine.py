@@ -116,7 +116,16 @@ async def _grade(
         return
 
     per_tool = config.get("tool_sample_rates", {})
-    sample_rate = per_tool.get(tool_name, config.get("sample_rate", GRADING_SAMPLE_RATE))
+    # Swarm subtasks are recorded under synthetic names ("local_review_diff:
+    # security"), which never match a bare tool_sample_rates key — so a
+    # configured per-tool rate would silently fall back to the global one.
+    # maxsplit=1 because consensus keys embed the model name, colons and
+    # all ("local_consensus:qwen3:8b").
+    base_tool = tool_name.split(":", 1)[0]
+    sample_rate = per_tool.get(
+        tool_name,
+        per_tool.get(base_tool, config.get("sample_rate", GRADING_SAMPLE_RATE)),
+    )
 
     await _check_capacity_once(config)
 

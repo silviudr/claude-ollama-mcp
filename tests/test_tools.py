@@ -11,6 +11,7 @@ from ollama_mcp.tools import (
     local_benchmark,
     local_classify_task,
     local_commit_message,
+    local_consensus,
     local_draft_boilerplate,
     local_generate_tests,
     local_implement_small,
@@ -127,6 +128,268 @@ async def test_local_generate_tests_empty_context():
 
     payload = json.loads(route.calls[0].request.read())
     assert "Additional context" not in payload["system"]
+
+
+def _swarm_routes_config(tmp_path, dims):
+    return {
+        "default_backend": "ollama",
+        "backends": {"ollama": {"url": OLLAMA_URL, "default_model": "gemma4-32k"}},
+        "swarm": {"review_dimensions": {"local_review_diff": dims}},
+    }
+
+
+@respx.mock
+async def test_local_review_diff_swarm_merges_dimensions(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps(_swarm_routes_config(
+        tmp_path, {"security": "sec-model", "performance": "perf-model"},
+    )))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+
+    def handler(request):
+        model = json.loads(request.content)["model"]
+        if model == "sec-model":
+            body = {"findings": [
+                {"severity": "HIGH", "category": "SECURITY", "message": "sql injection"},
+            ], "summary": "1 finding"}
+        else:
+            body = {"findings": [
+                {"severity": "LOW", "category": "PERFORMANCE", "message": "slow query"},
+            ], "summary": "1 finding"}
+        return httpx.Response(200, json={"response": json.dumps(body)})
+
+    respx.post(API_URL).mock(side_effect=handler)
+
+    result = await local_review_diff("some diff")
+    assert "[security] sql injection" in result
+    assert "[performance] slow query" in result
+
+
+@respx.mock
+async def test_local_review_diff_swarm_partial_failure(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps(_swarm_routes_config(
+        tmp_path, {"security": "sec-model", "performance": "perf-model"},
+    )))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+
+    def handler(request):
+        model = json.loads(request.content)["model"]
+        if model == "sec-model":
+            body = {"findings": [], "summary": "clean"}
+            return httpx.Response(200, json={"response": json.dumps(body)})
+        return httpx.Response(500, text="server error")
+
+    respx.post(API_URL).mock(side_effect=handler)
+
+    result = await local_review_diff("some diff")
+    assert "performance dimension failed" in result
+
+
+@respx.mock
+async def test_local_review_diff_swarm_unparsed_dimension_not_labeled_as_failure(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps(_swarm_routes_config(
+        tmp_path, {"security": "sec-model", "performance": "perf-model"},
+    )))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+
+    def handler(request):
+        model = json.loads(request.content)["model"]
+        if model == "sec-model":
+            body = {"findings": [], "summary": "clean"}
+            return httpx.Response(200, json={"response": json.dumps(body)})
+        # A real, successful response that just isn't valid JSON.
+        return httpx.Response(200, json={"response": "Here is my review: looks fine overall."})
+
+    respx.post(API_URL).mock(side_effect=handler)
+
+    result = await local_review_diff("some diff")
+    assert "performance dimension returned unparsed output" in result
+    assert "looks fine overall" in result
+    assert "performance dimension failed" not in result
+
+
+@respx.mock
+async def test_local_review_diff_swarm_focus_exact_match_avoids_false_positive(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps(_swarm_routes_config(
+        tmp_path, {"test": "test-model", "security": "sec-model"},
+    )))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+
+    def handler(request):
+        return httpx.Response(200, json={"response": json.dumps({"findings": [], "summary": "clean"})})
+
+    route = respx.post(API_URL).mock(side_effect=handler)
+
+    # "fastest" contains "test" as a substring but isn't the dimension name —
+    # must not spuriously select the "test" dimension. Since it matches no
+    # dimension exactly, all configured dimensions run (safe fallback).
+    await local_review_diff("some diff", focus="fastest")
+
+    called_models = {json.loads(c.request.content)["model"] for c in route.calls}
+    assert called_models == {"test-model", "sec-model"}
+
+
+@respx.mock
+async def test_local_review_diff_swarm_focus_filters_dimensions(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps(_swarm_routes_config(
+        tmp_path, {"security": "sec-model", "performance": "perf-model", "tests": "test-model"},
+    )))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+
+    def handler(request):
+        return httpx.Response(200, json={"response": json.dumps({"findings": [], "summary": "clean"})})
+
+    route = respx.post(API_URL).mock(side_effect=handler)
+
+    await local_review_diff("some diff", focus="security")
+
+    called_models = {json.loads(c.request.content)["model"] for c in route.calls}
+    assert called_models == {"sec-model"}
+
+
+@respx.mock
+async def test_local_consensus_disabled_message_differs_from_unconfigured(
+    tmp_path, monkeypatch,
+):
+    """'You turned it off' and 'you never set it up' need different advice —
+    telling someone to add config they already have is a dead end."""
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps({
+        "default_backend": "ollama",
+        "backends": {"ollama": {"default_model": "gemma4-32k"}},
+        "swarm": {
+            "enabled": False,
+            "consensus_candidates": {"local_consensus": ["gemma4-32k", "llama3.1"]},
+        },
+    }))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+
+    result = await local_consensus("what is 2+2?")
+    assert "disabled" in result
+    assert "swarm.enabled" in result
+    assert "No consensus candidates configured" not in result
+
+
+@respx.mock
+async def test_local_consensus_explicit_models_work_when_swarm_disabled(
+    tmp_path, monkeypatch,
+):
+    """Documented escape hatch: an explicit models= list bypasses the switch,
+    so a one-off comparison still works with swarms turned off."""
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps({
+        "default_backend": "ollama",
+        "backends": {"ollama": {"url": OLLAMA_URL, "default_model": "gemma4-32k"}},
+        "swarm": {
+            "enabled": False,
+            "consensus_candidates": {"local_consensus": ["gemma4-32k"]},
+        },
+    }))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+
+    respx.post(f"{OLLAMA_URL}/api/generate").mock(
+        return_value=httpx.Response(200, json={
+            "response": "the answer is four",
+            "prompt_eval_count": 5, "eval_count": 4, "eval_duration": 100_000_000,
+        })
+    )
+
+    result = await local_consensus("what is 2+2?", models="llama3.2,qwen3:8b")
+    assert "disabled" not in result
+    assert "the answer is four" in result
+
+
+async def test_local_consensus_no_config_message():
+    result = await local_consensus("what is 2+2?")
+    assert "No consensus candidates configured" in result
+
+
+@respx.mock
+async def test_local_consensus_models_override():
+    respx.post(API_URL).mock(
+        return_value=httpx.Response(200, json={"response": "the answer is 4"})
+    )
+
+    result = await local_consensus("what is 2+2?", models="m1,m2")
+    assert "2/2 models agree" in result
+    assert "m1" in result
+    assert "m2" in result
+
+
+@respx.mock
+async def test_local_consensus_agreement_report(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps({
+        "default_backend": "ollama",
+        "backends": {"ollama": {"url": OLLAMA_URL, "default_model": "gemma4-32k"}},
+        "swarm": {"consensus_candidates": {"local_consensus": ["m1", "m2"]}},
+    }))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+
+    respx.post(API_URL).mock(
+        return_value=httpx.Response(200, json={"response": "the answer is 4"})
+    )
+
+    result = await local_consensus("what is 2+2?")
+    assert "2/2 models agree" in result
+
+
+@respx.mock
+async def test_local_consensus_disagreement_report(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps({
+        "default_backend": "ollama",
+        "backends": {"ollama": {"url": OLLAMA_URL, "default_model": "gemma4-32k"}},
+        "swarm": {"consensus_candidates": {"local_consensus": ["m1", "m2"]}},
+    }))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+
+    def handler(request):
+        model = json.loads(request.content)["model"]
+        text = "alpha alpha alpha alpha" if model == "m1" else "beta beta beta beta"
+        return httpx.Response(200, json={"response": text})
+
+    respx.post(API_URL).mock(side_effect=handler)
+
+    result = await local_consensus("pick a letter")
+    assert "No majority" in result
+
+
+@respx.mock
+async def test_local_consensus_partial_candidate_failure(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps({
+        "default_backend": "ollama",
+        "backends": {"ollama": {"url": OLLAMA_URL, "default_model": "gemma4-32k"}},
+        "swarm": {"consensus_candidates": {"local_consensus": ["good", "bad"]}},
+    }))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+
+    def handler(request):
+        model = json.loads(request.content)["model"]
+        if model == "good":
+            return httpx.Response(200, json={"response": "the answer"})
+        return httpx.Response(500, text="server error")
+
+    respx.post(API_URL).mock(side_effect=handler)
+
+    result = await local_consensus("some prompt")
+    assert "the answer" in result
+    assert "bad" in result
 
 
 @pytest.fixture(autouse=True)

@@ -149,6 +149,127 @@ def _adaptive_score(stats: dict, quality_weight: float) -> float:
     return quality_weight * quality + (1 - quality_weight) * speed
 
 
+class SwarmConfig:
+    """Parsed agent-swarm configuration."""
+
+    def __init__(
+        self,
+        enabled: bool = False,
+        review_dimensions: dict[str, dict[str, str]] | None = None,
+        consensus_candidates: dict[str, list[str]] | None = None,
+        concurrency: dict[str, int] | None = None,
+    ):
+        self.enabled = enabled
+        self.review_dimensions = review_dimensions or {}
+        self.consensus_candidates = consensus_candidates or {}
+        self.concurrency = concurrency or {}
+
+
+def _parse_swarm(raw: dict) -> SwarmConfig:
+    section = raw.get("swarm", {})
+    if not section:
+        return SwarmConfig()
+    # Defaults to on when a swarm section exists, unlike adaptive's opt-in
+    # flag: configs written before this flag existed are switched on by the
+    # mere presence of review_dimensions/consensus_candidates, and silently
+    # disabling them on upgrade would be a nasty surprise. Set
+    # "enabled": false to turn the whole feature off without deleting config.
+    return SwarmConfig(
+        enabled=section.get("enabled", True),
+        review_dimensions=section.get("review_dimensions", {}),
+        consensus_candidates=section.get("consensus_candidates", {}),
+        concurrency=section.get("concurrency", {}),
+    )
+
+
+def resolve_swarm_dimensions(tool_name: str) -> dict[str, tuple[Backend, str]]:
+    """Resolve configured review dimensions for a tool to (backend, model).
+
+    Returns {} when unconfigured — the caller's signal to use its existing
+    single-call path unchanged.
+    """
+    raw = _load_raw()
+    backends, default_name, _ = _parse_config(raw)
+    swarm = _parse_swarm(raw)
+    if not swarm.enabled:
+        return {}
+
+    dims = swarm.review_dimensions.get(tool_name)
+    if not dims:
+        return {}
+
+    resolved = {}
+    for dim_name, candidate in dims.items():
+        backend_name, model = _resolve_candidate(candidate, backends, default_name)
+        backend = backends.get(backend_name, backends[default_name])
+        resolved[dim_name] = (backend, model or backend.default_model)
+    return resolved
+
+
+def resolve_candidate_list(candidates: list[str]) -> list[tuple[str, Backend, str]]:
+    """Resolve a list of bare/prefixed candidate strings against configured
+    backends. Used for both config-driven and ad-hoc (user-supplied) lists.
+
+    Returns [(candidate_label, backend, model), ...].
+    """
+    raw = _load_raw()
+    backends, default_name, _ = _parse_config(raw)
+
+    resolved = []
+    for candidate in candidates:
+        backend_name, model = _resolve_candidate(candidate, backends, default_name)
+        backend = backends.get(backend_name, backends[default_name])
+        resolved.append((candidate, backend, model or backend.default_model))
+    return resolved
+
+
+def resolve_swarm_candidates(tool_name: str) -> list[tuple[str, Backend, str]]:
+    """Resolve configured consensus candidates for a tool.
+
+    Returns [(candidate_label, backend, model), ...], [] when unconfigured.
+    """
+    raw = _load_raw()
+    swarm = _parse_swarm(raw)
+    if not swarm.enabled:
+        return []
+
+    candidates = swarm.consensus_candidates.get(tool_name)
+    if not candidates:
+        return []
+
+    return resolve_candidate_list(candidates)
+
+
+def is_swarm_enabled() -> bool:
+    """Whether agent swarms are active. False when no swarm section exists
+    at all, or when it sets "enabled": false."""
+    return _parse_swarm(_load_raw()).enabled
+
+
+def is_swarm_configured_but_disabled() -> bool:
+    """True only when real swarm config exists and "enabled": false turned it
+    off — which needs different advice than never having set it up at all."""
+    swarm = _parse_swarm(_load_raw())
+    return not swarm.enabled and bool(
+        swarm.review_dimensions or swarm.consensus_candidates
+    )
+
+
+def get_swarm_concurrency() -> dict[str, int]:
+    """DEFAULT_CONCURRENCY merged with routes.json swarm.concurrency overrides.
+
+    Deliberately NOT gated on swarm.enabled: local_benchmark fans out over
+    the same primitive and is a separate feature, so turning agent swarms
+    off must not leave benchmarking uncapped.
+    """
+    from .swarm import DEFAULT_CONCURRENCY
+
+    raw = _load_raw()
+    caps = dict(DEFAULT_CONCURRENCY)
+    caps.update(_parse_swarm(raw).concurrency)
+    return caps
+
+
 def _parse_config(raw: dict) -> tuple[dict[str, Backend], str, dict[str, tuple[str, str]]]:
     """Parse config into (backends, default_backend_name, routes).
 
@@ -305,5 +426,28 @@ def get_routes_info() -> str:
                     lines.append(f"    {c}: no data yet")
     elif adaptive.enabled:
         lines += ["", "Adaptive routing: enabled (no candidates configured)"]
+
+    swarm = _parse_swarm(raw)
+    if (swarm.review_dimensions or swarm.consensus_candidates) and not swarm.enabled:
+        lines += [
+            "",
+            "Agent swarm: disabled (swarm.enabled = false)",
+            "  Configured but inactive — local_review_diff makes a single call,",
+            "  local_consensus reports swarms are disabled. Set swarm.enabled to true.",
+        ]
+    elif swarm.review_dimensions or swarm.consensus_candidates:
+        caps = get_swarm_concurrency()
+        lines += ["", "Agent swarm: enabled"]
+        lines.append(
+            "  concurrency: " + ", ".join(f"{k}={v}" for k, v in sorted(caps.items()))
+        )
+        for tool in sorted(swarm.review_dimensions):
+            dims = swarm.review_dimensions[tool]
+            lines.append(f"  {tool} review dimensions:")
+            for dim, candidate in dims.items():
+                lines.append(f"    {dim} -> {candidate}")
+        for tool in sorted(swarm.consensus_candidates):
+            candidates = swarm.consensus_candidates[tool]
+            lines.append(f"  {tool} consensus candidates: {', '.join(candidates)}")
 
     return "\n".join(lines)

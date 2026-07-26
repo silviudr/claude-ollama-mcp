@@ -448,8 +448,15 @@ _DUAL_INPUT_CHECKERS = {check_diff_file_references, check_tests_collectable,
 def run_heuristics(
     tool_name: str, input_text: str, output_text: str
 ) -> list[dict]:
-    """Run all applicable heuristic checks for a tool."""
-    checkers = TOOL_CHECKERS.get(tool_name, [check_non_empty])
+    """Run all applicable heuristic checks for a tool.
+
+    Swarm sub-tasks are logged under synthetic names like
+    "local_review_diff:security" so they get their own telemetry/grading
+    rows — but checker selection must resolve to the base tool name, or
+    every sub-task would silently fall back to only check_non_empty.
+    """
+    base_tool = tool_name.split(":", 1)[0]
+    checkers = TOOL_CHECKERS.get(base_tool, [check_non_empty])
     results = []
     for checker in checkers:
         if checker in _DUAL_INPUT_CHECKERS:
@@ -458,11 +465,11 @@ def run_heuristics(
             results.append(checker(output_text))
 
     # Tool-specific extra checks that need both input and output
-    if tool_name == "local_review_diff":
+    if base_tool == "local_review_diff":
         results.append(check_diff_file_references(output_text, input_text))
-    if tool_name == "local_generate_tests":
+    if base_tool == "local_generate_tests":
         results.append(check_tests_collectable(output_text, input_text))
-    if tool_name == "local_draft_boilerplate":
+    if base_tool == "local_draft_boilerplate":
         results.append(check_boilerplate_format(output_text, input_text))
 
     return results

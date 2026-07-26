@@ -269,6 +269,76 @@ class TestGrade:
 
         assert all(g["grade_type"] == "heuristic" for g in grades_logged)
 
+    @respx.mock
+    async def test_swarm_subtask_base_rate_enables_semantic(self, tmp_path, monkeypatch):
+        """Base-tool rate 1.0 must reach a subtask even when global is 0.0 —
+        the exact case that silently degraded before."""
+        f = tmp_path / "routes.json"
+        f.write_text(json.dumps({
+            "grading": {
+                "enabled": True,
+                "sample_rate": 0.0,
+                "backend": "openrouter",
+                "model": "test-model",
+                "tool_sample_rates": {"local_review_diff": 1.0},
+            }
+        }))
+        monkeypatch.setattr("ollama_mcp.grading.engine.ROUTES_CONFIG_PATH", f)
+        monkeypatch.setattr("ollama_mcp.grading.engine._capacity_checked", True)
+
+        grades_logged = []
+        monkeypatch.setattr(
+            "ollama_mcp.grading.engine.log_grade",
+            lambda g: grades_logged.append(g),
+        )
+
+        grade_json = json.dumps({
+            "correctness": 4, "completeness": 4, "format": 5,
+            "conciseness": 4, "overall": 0.85, "issues": [],
+        })
+        respx.post(OR_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": grade_json}}],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+                },
+            )
+        )
+
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+        await _grade("local_review_diff:security", "diff", "a finding", 1)
+
+        semantic = [g for g in grades_logged if g["grade_type"] == "semantic"]
+        assert len(semantic) == 1
+
+    @respx.mock
+    async def test_exact_subtask_rate_beats_base_tool_rate(self, tmp_path, monkeypatch):
+        """An exact synthetic-name entry still wins over the base-tool one."""
+        f = tmp_path / "routes.json"
+        f.write_text(json.dumps({
+            "grading": {
+                "enabled": True,
+                "sample_rate": 1.0,
+                "tool_sample_rates": {
+                    "local_review_diff": 1.0,
+                    "local_review_diff:security": 0.0,
+                },
+            }
+        }))
+        monkeypatch.setattr("ollama_mcp.grading.engine.ROUTES_CONFIG_PATH", f)
+        monkeypatch.setattr("ollama_mcp.grading.engine._capacity_checked", True)
+
+        grades_logged = []
+        monkeypatch.setattr(
+            "ollama_mcp.grading.engine.log_grade",
+            lambda g: grades_logged.append(g),
+        )
+
+        await _grade("local_review_diff:security", "diff", "a finding", 1)
+
+        assert all(g["grade_type"] == "heuristic" for g in grades_logged)
+
 
 class TestScheduleGrading:
     async def test_schedule_creates_task(self, monkeypatch):

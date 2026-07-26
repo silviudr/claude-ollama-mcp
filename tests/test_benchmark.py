@@ -1,4 +1,6 @@
+import asyncio
 import json
+import time
 
 import httpx
 import respx
@@ -19,12 +21,21 @@ def _ollama_response(response_text="ok", prompt_tokens=10, output_tokens=5):
     })
 
 
+def _by_model(responses: dict):
+    """respx side_effect keyed by request model — dispatch is concurrent now,
+    so replies can't rely on request arrival order matching model order."""
+    def handler(request):
+        model = json.loads(request.content)["model"]
+        return responses[model]
+    return handler
+
+
 @respx.mock
 async def test_run_benchmark_with_explicit_models():
-    respx.post(API_URL).mock(side_effect=[
-        _ollama_response("answer from alpha", 10, 5),
-        _ollama_response("answer from beta", 12, 8),
-    ])
+    respx.post(API_URL).mock(side_effect=_by_model({
+        "alpha": _ollama_response("answer from alpha", 10, 5),
+        "beta": _ollama_response("answer from beta", 12, 8),
+    }))
 
     results = await run_benchmark("say hello", models=["alpha", "beta"])
 
@@ -44,10 +55,10 @@ async def test_run_benchmark_auto_discovers_models():
             {"name": "llama3.1"},
         ],
     }))
-    respx.post(API_URL).mock(side_effect=[
-        _ollama_response("gemma answer"),
-        _ollama_response("llama answer"),
-    ])
+    respx.post(API_URL).mock(side_effect=_by_model({
+        "gemma4-32k": _ollama_response("gemma answer"),
+        "llama3.1": _ollama_response("llama answer"),
+    }))
 
     results = await run_benchmark("test prompt")
 
@@ -58,16 +69,43 @@ async def test_run_benchmark_auto_discovers_models():
 
 @respx.mock
 async def test_run_benchmark_handles_model_failure():
-    respx.post(API_URL).mock(side_effect=[
-        _ollama_response("works fine"),
-        httpx.Response(404, text="model not found"),
-    ])
+    respx.post(API_URL).mock(side_effect=_by_model({
+        "good-model": _ollama_response("works fine"),
+        "bad-model": httpx.Response(404, text="model not found"),
+    }))
 
     results = await run_benchmark("test", models=["good-model", "bad-model"])
 
     assert results[0].success is True
     assert results[1].success is False
     assert results[1].error is not None
+
+
+@respx.mock
+async def test_run_benchmark_runs_concurrently():
+    """Asserts on observed overlap rather than elapsed time — a wall-clock
+    threshold flakes on a loaded CI runner even when the code is correctly
+    concurrent. Mirrors how test_swarm.py tracks max_active."""
+    in_flight = 0
+    max_in_flight = 0
+
+    async def slow_response(request):
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        try:
+            await asyncio.sleep(0.05)
+            return _ollama_response("ok")
+        finally:
+            in_flight -= 1
+
+    respx.post(API_URL).mock(side_effect=slow_response)
+
+    results = await run_benchmark("test", models=["m1", "m2"])
+
+    assert len(results) == 2
+    assert all(r.success for r in results)
+    assert max_in_flight > 1  # genuinely overlapped, not run back-to-back
 
 
 @respx.mock
@@ -94,6 +132,25 @@ async def test_run_benchmark_with_system_prompt():
 
 
 # --- format_results tests ---
+
+
+@respx.mock
+async def test_run_benchmark_records_no_telemetry(monkeypatch):
+    """Benchmarking is a side-effect-free comparison — it must not schedule
+    grading (which can hit a paid backend) for every model compared."""
+    recorded = []
+    graded = []
+    monkeypatch.setattr("ollama_mcp.telemetry.record", lambda event: recorded.append(event) or 1)
+    monkeypatch.setattr(
+        "ollama_mcp.grading.schedule_grading",
+        lambda *a, **kw: graded.append(a),
+    )
+    respx.post(API_URL).mock(return_value=_ollama_response("ok"))
+
+    await run_benchmark("test", models=["m1", "m2"])
+
+    assert recorded == []
+    assert graded == []
 
 
 def test_format_results_empty():

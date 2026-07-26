@@ -65,10 +65,11 @@ claude-ollama-mcp/
 | `local_draft_boilerplate`  | Mechanical scaffolds (Dockerfile, CI workflow, .gitignore, dataclass)    |
 | `local_implement_small`    | Self-contained function or short script (~≤50 lines) from a clear spec   |
 | `local_commit_message`     | One-line conventional-commit subject from a diff                         |
-| `local_review_diff`        | Review a diff/file for bugs, security, complexity (structured output)    |
+| `local_review_diff`        | Review a diff/file for bugs, security, complexity (structured output). Fans out to parallel dimension reviewers when `swarm.review_dimensions` is configured — see [Agent swarm](#agent-swarm) |
 | `local_generate_tests`     | Generate pytest tests for a Python file                                  |
 | `local_usage_stats`        | Show usage statistics and estimated cloud cost avoided                   |
-| `local_benchmark`          | Compare prompt performance across multiple local models                  |
+| `local_benchmark`          | Compare prompt performance across multiple local models (runs concurrently) |
+| `local_consensus`          | Send one prompt to multiple models concurrently, report agreement/disagreement — see [Agent swarm](#agent-swarm) |
 | `local_list_models`        | List all models available in the local Ollama instance                   |
 | `local_show_routes`        | Show current model routing configuration                                 |
 | `local_classify_task`      | Classify a prompt and recommend the best tool and model                  |
@@ -206,6 +207,9 @@ The server supports two backends:
 | -------------- | ---------------- | ---------- | ---------- | ------------------------------ |
 | **Ollama**     | Your machine     | Free       | Yes        | Fast iteration, privacy        |
 | **OpenRouter** | openrouter.ai    | Per-token  | No         | No GPU, access to many models  |
+
+Concurrent fan-out calls (agent swarm, `local_benchmark`) cap concurrency
+per backend type — see [Agent swarm](#agent-swarm) for the defaults.
 
 ### Quick start: Ollama only (default)
 
@@ -355,6 +359,10 @@ ollama-mcp bench "Hello"                          # all available models
 # Show usage statistics
 ollama-mcp stats
 ```
+
+`local_consensus` and configured `local_review_diff` fan-out are MCP-tool-only
+for now — there's no CLI subcommand for them yet (the `bench` subcommand is
+the precedent to follow if CLI parity is wanted later).
 
 ### Benchmark output
 
@@ -755,6 +763,311 @@ with no grading data show "no data yet".
   is not listed in `candidates`, adaptive routing ignores it.
 
 
+## Agent swarm
+
+Two tools fan out concurrent model calls instead of one call at a time:
+
+- **`local_review_diff`** — parallel dimension review. Instead of one model
+  covering every category, N focused reviewers (security, performance,
+  correctness, tests, ...) run concurrently, each optionally a different
+  model, and their findings are merged into one report.
+- **`local_consensus`** — multi-model consensus. The same prompt goes to N
+  models concurrently, and the result is an agreement/disagreement report,
+  not just a latency table like `local_benchmark`.
+
+Both sit on the same execution primitive (`ollama_mcp/swarm.py`), which caps
+concurrency **per backend** — local Ollama is GPU-bound and can thrash VRAM
+if too many models load at once, while a cloud backend like OpenRouter can
+handle much higher concurrency:
+
+| Backend      | Default concurrency cap |
+|--------------|--------------------------|
+| `ollama`     | 2                        |
+| `openrouter` | 8                        |
+| (unknown)    | 4                        |
+
+**Without any `swarm` config, both tools behave exactly as before**:
+`local_review_diff` makes its one existing call, and `local_consensus` is
+present but returns an explanatory message until candidates are configured.
+
+### Prerequisites
+
+Configuration alone isn't enough — a swarm has to physically fit and the
+backend has to actually serve calls in parallel.
+
+**1. Every model you reference must already be pulled.** A dimension pointing
+at a missing model doesn't fall back, it fails that dimension:
+
+```bash
+ollama list                  # what you have
+ollama pull qwen3:8b         # add what you're missing
+```
+
+**2. Concurrently-loaded models must fit in VRAM.** This is the constraint
+that most often turns a "concurrent" swarm into a slow serial one, because
+Ollama evicts and reloads models that don't fit together. Budget by loaded
+size, which runs larger than the on-disk size in `ollama list` — a 5.2 GB
+model can occupy ~6 GB once loaded with its context:
+
+```bash
+nvidia-smi --query-gpu=memory.total,memory.used --format=csv
+ollama ps                    # what's resident right now, and how big
+```
+
+On a 16 GB card, two mid-size models (say 6 GB + 3 GB) coexist comfortably,
+while two 9.6 GB models do not. Prefer several smaller models over two large
+ones, or split the swarm across `ollama` and a cloud backend so only some of
+it competes for VRAM.
+
+**3. Confirm Ollama serves requests in parallel.** The per-backend cap limits
+how many calls this server *sends*; it can't make Ollama handle them at once.
+Defaults vary by Ollama version and available memory, so measure rather than
+assume:
+
+```bash
+# Serial baseline
+time ( ollama run qwen3:8b "say hi" >/dev/null 2>&1
+       ollama run llama3.2 "say hi" >/dev/null 2>&1 )
+
+# Same two calls, concurrent
+time ( ollama run qwen3:8b "say hi" >/dev/null 2>&1 &
+       ollama run llama3.2 "say hi" >/dev/null 2>&1 &
+       wait )
+```
+
+Run each twice and compare the second timings — the first run pays one-time
+model loading that swamps the measurement. A healthy result is the concurrent
+block landing near the slower single call (e.g. 9.3s serial vs 4.5s
+concurrent). If the two timings are about equal, Ollama is serializing.
+Raise the limits on the server (not in `routes.json` — these are Ollama's own
+settings) and restart it:
+
+```bash
+OLLAMA_NUM_PARALLEL=4 OLLAMA_MAX_LOADED_MODELS=3 ollama serve
+```
+
+Two separate limits are at play, and they fail differently:
+
+| Setting | Governs | Symptom when too low |
+|---|---|---|
+| `OLLAMA_MAX_LOADED_MODELS` | how many *distinct* models stay resident | models evict and reload between sub-tasks |
+| `OLLAMA_NUM_PARALLEL` | concurrent requests to *one* model | two calls to the same model run back-to-back |
+
+The second one catches people out: with `OLLAMA_NUM_PARALLEL` at 1,
+**pointing several dimensions at the same model gains you nothing** — they
+serialize even though the swarm dispatched them together. Two calls to one
+model measured 7.21s serial vs 7.22s "concurrent" on a default install. Either
+give each dimension a different model, or raise `OLLAMA_NUM_PARALLEL`.
+
+**4. Assign each sub-task a model that can do the job.** Two constraints
+combine here and they are easy to miss:
+
+- **Structured-output tools need a model that can follow a JSON schema.**
+  `local_review_diff` requires it. Smaller models often return the *schema*
+  instead of an instance — that dimension is then reported as unparsed rather
+  than silently dropped, but you lose its findings. Test a candidate before
+  wiring it to a dimension.
+- **Reasoning models are a poor fit for wide fan-out.** A model that emits
+  long internal-monologue output can take several times longer on real input
+  than a quick benchmark suggests, and a swarm waits for its slowest member.
+
+A worked example on a 16 GB card: of the locally available models, three
+could hold the review schema at 6 GB, 6 GB, and 10 GB loaded — but the two
+that fit together included a reasoning model that pushed a 4-dimension review
+past 100s, while the fastest one couldn't share VRAM with any other. The
+workable configuration put two dimensions on a **cloud** backend (no VRAM
+cost, genuinely parallel with local work) and two on a local model.
+
+**Pairing local with remote is often the only way to get real parallelism on
+a single GPU.** Consider it the default rather than a fallback.
+
+**5. Pick models with similar latency.** A swarm's wall-clock time is its
+*slowest* member, so pairing a 4-second model with a 0.3-second one costs
+almost as much as the slow one alone. Grouping comparable models is what
+turns fan-out into real speedup.
+
+### Configuration
+
+Add a `swarm` section to `~/.config/ollama_mcp/routes.json`:
+
+```json
+{
+  "swarm": {
+    "enabled": true,
+    "concurrency": {"ollama": 2, "openrouter": 8},
+    "review_dimensions": {
+      "local_review_diff": {
+        "security": "gemma4-32k",
+        "performance": "qwen3:8b",
+        "correctness": "openrouter/google/gemma-4-31b-it:free",
+        "tests": "gemma4-32k"
+      }
+    },
+    "consensus_candidates": {
+      "local_consensus": ["gemma4-32k", "qwen3:8b", "openrouter/google/gemma-4-31b-it:free"]
+    }
+  }
+}
+```
+
+Candidate strings use the same format as adaptive routing: a bare name
+(`"gemma4-32k"`) uses the default backend, a prefixed name
+(`"openrouter/google/gemma-4-31b-it:free"`) targets the named backend.
+
+### Turning swarms on and off
+
+`swarm.enabled` is the single switch. Set it to `false` to turn the whole
+feature off **without deleting your configuration**, so you can flip it back
+without retyping dimensions and candidates:
+
+```json
+{"swarm": {"enabled": false, "review_dimensions": {"...": {}}}}
+```
+
+| `swarm.enabled` | Effect |
+|-----------------|--------|
+| absent, with a `swarm` section present | **on** — presence of config means intent to use it |
+| `true` | on |
+| `false` | off: `local_review_diff` makes its single call, `local_consensus` explains it was switched off |
+| no `swarm` section at all | off |
+
+Note this defaults differently from `adaptive.enabled`, which is opt-in
+(absent means off). Swarm defaults to on when a `swarm` section exists so
+that configs written before this flag was added keep working on upgrade.
+
+`local_show_routes` reports the current state (`Agent swarm: enabled` /
+`Agent swarm: disabled`), so you never have to infer it from behavior.
+
+Two things the switch deliberately does **not** affect:
+
+- `local_benchmark` still fans out and still respects `swarm.concurrency` —
+  it is multi-model benchmarking, not an agent swarm, and disabling swarms
+  must not leave it uncapped.
+- `local_consensus` still honors an explicit `models="a,b"` argument, so a
+  one-off comparison works even with swarms off.
+
+If a tool is configured under both `adaptive.candidates` and `swarm.*`, the
+swarm config takes precedence.
+
+### Verifying the setup
+
+`routes.json` is re-read on every call, so **config changes take effect
+immediately — no restart**. (Upgrading the package itself is code, not
+config, and does need the MCP server restarted. With a stdio server that
+just means starting a new client session.)
+
+**1. Confirm the config parsed.** Call `local_show_routes`. Nothing is
+inferred from behavior — it names the state outright:
+
+```
+Agent swarm: enabled
+  concurrency: ollama=2, openrouter=4
+  local_review_diff review dimensions:
+    security -> openrouter/google/gemma-4-31b-it:free
+    performance -> qwen3:8b
+  local_consensus consensus candidates: qwen3:8b, llama3.2
+```
+
+A typo'd key (`review_dimension`, `consensus_candidate`) parses as *absent*
+rather than erroring, so if a section you wrote is missing from this output,
+check the spelling first.
+
+**2. Watch a swarm run.** Each sub-task appends a row as it completes, so
+fan-out looks like rows landing together rather than spaced out:
+
+```bash
+tail -f ~/.cache/ollama_mcp.jsonl | jq -c '{tool, model, backend, ok, wall_ms}'
+watch -n 0.5 ollama ps       # models resident at the same time
+```
+
+**3. Check it actually paralleled.** Compare the sub-task rows for one call:
+if the elapsed time for the whole call is close to the *slowest* sub-task,
+the swarm ran concurrently; if it approaches the *sum*, something serialized
+— revisit prerequisites 2 and 3.
+
+Common first-run surprises:
+
+| Symptom | Cause |
+|---|---|
+| `local_consensus` says candidates aren't configured | `swarm.enabled` is `false`, or the key is under the wrong tool name |
+| One dimension always fails | model not pulled, or a rate-limited/unreachable cloud backend |
+| No speedup vs a single call | VRAM thrashing, Ollama serializing, or mismatched model speeds |
+| Review ignores your `focus` value | `focus` must match configured dimension names *exactly*; no match runs all of them |
+
+### `local_review_diff` — the `focus` parameter changes meaning
+
+- **No `swarm.review_dimensions` configured:** `focus` is a soft hint
+  appended to the single review prompt, exactly as before.
+- **Configured:** `focus` becomes a dimension filter. Pass a comma-separated
+  list (e.g. `focus="security,performance"`) to run only the matching
+  dimensions. If nothing matches (typo, or a freeform hint), all configured
+  dimensions run rather than none.
+
+Merged findings from more than one dimension are prefixed with
+`[dimension]`, near-duplicate findings on the same file/line are
+deduplicated (the higher-severity one survives, noted as "also flagged
+by ..."), and a dimension that errors is never silently dropped — it's
+named in the summary instead of fabricating a finding.
+
+### `local_consensus`
+
+```
+local_consensus(prompt="...", models="gemma4-32k,qwen3:8b")
+```
+
+`models` is an optional ad-hoc comma-separated override — usable without
+touching `routes.json`, mirroring `local_benchmark`. Without it, candidates
+come from `swarm.consensus_candidates`.
+
+Agreement is computed by **word-set containment** — shared words over the
+word count of the *shorter* answer — not semantic understanding. Two answers
+cluster when they overlap by ≥ 60% and share at least 3 words.
+
+Normalizing by the shorter answer is deliberate: it makes the comparison
+insensitive to verbosity, so a terse answer and a long-winded one that covers
+the same ground still count as agreeing. The metric is still lexical, so
+models that agree on substance while sharing no vocabulary will read as
+disagreeing. Example output:
+
+```
+Agreement: 2/3 models agree.
+
+Consensus answer (from gemma4-32k, qwen3:8b):
+def is_palindrome(s): return s == s[::-1]
+
+Divergent (deepseek-coder): def is_palindrome(s):
+    cleaned = ''.join(c.lower() for c in s if c.isalnum())
+    return cleaned == cleaned[::-1]
+
+── Latency / tokens ──
+  gemma4-32k (gemma4-32k): 620ms, 40+12 tok
+  qwen3:8b (qwen3:8b): 540ms, 40+15 tok
+  deepseek-coder (deepseek-coder): 900ms, 40+28 tok
+```
+
+### Telemetry
+
+Each sub-task (a review dimension, or one consensus candidate) is logged
+under a synthetic tool name like `local_review_diff:security` or
+`local_consensus:qwen3:8b`. These show up as their own rows in
+`local_usage_stats` and `local_grading_report`.
+
+`grading.tool_sample_rates` resolves against those names most-specific-first:
+an exact entry (`"local_review_diff:security"`) wins, otherwise the base
+tool's rate (`"local_review_diff"`) applies to all of its sub-tasks, and
+failing both, the global `sample_rate`. So a per-tool rate covers a swarm
+without you having to enumerate every dimension, and you can still single one
+out when you want to.
+
+**Known limitation — swarm-configured tools don't feed adaptive routing.**
+Grades are stored under the synthetic name, while adaptive routing looks up
+scores by exact tool name. A tool with `review_dimensions` configured
+therefore accumulates no adaptive data, and any `adaptive.candidates` entry
+for it will sit at "no data yet" indefinitely. The two features work, but not
+on the same tool at the same time — which is consistent with swarm config
+taking precedence over adaptive.
+
+
 ## Privacy intercept
 
 Every tool input is scanned for sensitive content before processing. The
@@ -1075,6 +1388,10 @@ claude --mcp-debug
 3. Write a docstring that says clearly **when to use** and **when NOT to
    use** the tool — that's the only thing Claude sees.
 4. Restart Claude Code (or `/mcp reconnect`) so the tool list refreshes.
+
+If the tool needs to fan out to multiple models/candidates concurrently
+instead of one `generate()`/`generate_json()` call, use `run_swarm()` from
+`ollama_mcp/swarm.py` — see [Agent swarm](#agent-swarm) for the pattern.
 
 ## Running tests
 

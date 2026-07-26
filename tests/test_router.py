@@ -8,12 +8,17 @@ from ollama_mcp.router import (
     AdaptiveConfig,
     _adaptive_score,
     _parse_adaptive,
+    _parse_swarm,
     _pick_adaptive,
     _resolve_candidate,
     get_backends,
     get_routes_info,
+    get_swarm_concurrency,
     resolve,
+    resolve_candidate_list,
     resolve_model,
+    resolve_swarm_candidates,
+    resolve_swarm_dimensions,
 )
 
 
@@ -540,3 +545,231 @@ def test_pick_adaptive_with_prefixed_candidate(monkeypatch):
     )
     assert bname == "openrouter"
     assert model == "google/gemma-3-27b-it:free"
+
+
+# --- Agent swarm config ---
+
+
+def test_parse_swarm_empty():
+    config = _parse_swarm({})
+    assert config.review_dimensions == {}
+    assert config.consensus_candidates == {}
+    assert config.concurrency == {}
+    assert config.enabled is False
+
+
+def test_parse_swarm_defaults_enabled_when_section_present():
+    """Configs written before the flag existed must keep working — presence
+    of a swarm section means on unless explicitly turned off."""
+    config = _parse_swarm({"swarm": {"concurrency": {"ollama": 3}}})
+    assert config.enabled is True
+
+
+def test_parse_swarm_explicit_disable():
+    config = _parse_swarm({
+        "swarm": {
+            "enabled": False,
+            "review_dimensions": {"local_review_diff": {"security": "m"}},
+        },
+    })
+    assert config.enabled is False
+    # Config is retained, just inactive — so it can be flipped back on.
+    assert config.review_dimensions == {"local_review_diff": {"security": "m"}}
+
+
+def _disabled_swarm_config(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps({
+        "default_backend": "ollama",
+        "backends": {"ollama": {"default_model": "gemma4-32k"}},
+        "swarm": {
+            "enabled": False,
+            "review_dimensions": {"local_review_diff": {"security": "gemma4-32k"}},
+            "consensus_candidates": {"local_consensus": ["gemma4-32k", "llama3.1"]},
+        },
+    }))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+    return cfg
+
+
+def test_disabled_swarm_returns_no_dimensions(tmp_path, monkeypatch):
+    _disabled_swarm_config(tmp_path, monkeypatch)
+    assert resolve_swarm_dimensions("local_review_diff") == {}
+
+
+def test_disabled_swarm_returns_no_candidates(tmp_path, monkeypatch):
+    _disabled_swarm_config(tmp_path, monkeypatch)
+    assert resolve_swarm_candidates("local_consensus") == []
+
+
+def test_disabled_swarm_still_caps_benchmark_concurrency(tmp_path, monkeypatch):
+    """Turning swarms off must not leave local_benchmark's fan-out uncapped."""
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps({
+        "swarm": {"enabled": False, "concurrency": {"ollama": 3}},
+    }))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+    assert get_swarm_concurrency()["ollama"] == 3
+
+
+def test_is_swarm_enabled_reflects_config(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    from ollama_mcp.router import is_swarm_enabled
+
+    _disabled_swarm_config(tmp_path, monkeypatch)
+    assert is_swarm_enabled() is False
+
+    cfg = tmp_path / "on.json"
+    cfg.write_text(json.dumps({"swarm": {"consensus_candidates": {"t": ["m"]}}}))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+    assert is_swarm_enabled() is True
+
+
+def test_routes_info_shows_swarm_disabled(tmp_path, monkeypatch):
+    _disabled_swarm_config(tmp_path, monkeypatch)
+    out = get_routes_info()
+    assert "Agent swarm: disabled" in out
+    assert "swarm.enabled" in out
+
+
+def test_parse_swarm_populated():
+    raw = {
+        "swarm": {
+            "review_dimensions": {
+                "local_review_diff": {"security": "deepseek-coder"},
+            },
+            "consensus_candidates": {
+                "local_consensus": ["gemma4-32k", "llama3.1"],
+            },
+            "concurrency": {"ollama": 3},
+        },
+    }
+    config = _parse_swarm(raw)
+    assert config.review_dimensions == {"local_review_diff": {"security": "deepseek-coder"}}
+    assert config.consensus_candidates == {"local_consensus": ["gemma4-32k", "llama3.1"]}
+    assert config.concurrency == {"ollama": 3}
+
+
+def test_resolve_swarm_dimensions_unconfigured_returns_empty(monkeypatch):
+    import ollama_mcp.router as router
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", router.ROUTES_CONFIG_PATH.parent / "nonexistent")
+    assert resolve_swarm_dimensions("local_review_diff") == {}
+
+
+def test_resolve_swarm_dimensions_bare_and_prefixed(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps({
+        "default_backend": "ollama",
+        "backends": {
+            "ollama": {"default_model": "gemma4-32k"},
+            "openrouter": {"api_key": "k", "default_model": "def-model"},
+        },
+        "swarm": {
+            "review_dimensions": {
+                "local_review_diff": {
+                    "security": "deepseek-coder",
+                    "correctness": "openrouter/google/gemma-3-27b-it:free",
+                },
+            },
+        },
+    }))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+
+    dims = resolve_swarm_dimensions("local_review_diff")
+    assert set(dims) == {"security", "correctness"}
+    sec_backend, sec_model = dims["security"]
+    assert sec_backend.name == "ollama"
+    assert sec_model == "deepseek-coder"
+    cor_backend, cor_model = dims["correctness"]
+    assert cor_backend.name == "openrouter"
+    assert cor_model == "google/gemma-3-27b-it:free"
+
+
+def test_resolve_swarm_candidates_unconfigured_returns_empty(monkeypatch):
+    import ollama_mcp.router as router
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", router.ROUTES_CONFIG_PATH.parent / "nonexistent")
+    assert resolve_swarm_candidates("local_consensus") == []
+
+
+def test_resolve_swarm_candidates_from_config(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps({
+        "default_backend": "ollama",
+        "backends": {"ollama": {"default_model": "gemma4-32k"}},
+        "swarm": {
+            "consensus_candidates": {
+                "local_consensus": ["gemma4-32k", "llama3.1"],
+            },
+        },
+    }))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+
+    candidates = resolve_swarm_candidates("local_consensus")
+    assert [c[0] for c in candidates] == ["gemma4-32k", "llama3.1"]
+    assert all(be.name == "ollama" for _, be, _ in candidates)
+
+
+def test_resolve_candidate_list_ad_hoc(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps({
+        "default_backend": "ollama",
+        "backends": {
+            "ollama": {"default_model": "gemma4-32k"},
+            "openrouter": {"api_key": "k", "default_model": "def-model"},
+        },
+    }))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+
+    resolved = resolve_candidate_list(["gemma4-32k", "openrouter/google/gemma-3-27b-it:free"])
+    labels = [r[0] for r in resolved]
+    assert labels == ["gemma4-32k", "openrouter/google/gemma-3-27b-it:free"]
+    assert resolved[0][1].name == "ollama"
+    assert resolved[1][1].name == "openrouter"
+    assert resolved[1][2] == "google/gemma-3-27b-it:free"
+
+
+def test_get_swarm_concurrency_defaults(monkeypatch):
+    import ollama_mcp.router as router
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", router.ROUTES_CONFIG_PATH.parent / "nonexistent")
+    caps = get_swarm_concurrency()
+    assert caps == {"ollama": 2, "openrouter": 8}
+
+
+def test_get_swarm_concurrency_overrides(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps({"swarm": {"concurrency": {"ollama": 5}}}))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+
+    caps = get_swarm_concurrency()
+    assert caps["ollama"] == 5
+    assert caps["openrouter"] == 8
+
+
+def test_get_routes_info_shows_swarm(tmp_path, monkeypatch):
+    import ollama_mcp.router as router
+    cfg = tmp_path / "routes.json"
+    cfg.write_text(json.dumps({
+        "default_backend": "ollama",
+        "backends": {"ollama": {"default_model": "gemma4-32k"}},
+        "swarm": {
+            "review_dimensions": {
+                "local_review_diff": {"security": "deepseek-coder"},
+            },
+            "consensus_candidates": {
+                "local_consensus": ["gemma4-32k", "llama3.1"],
+            },
+        },
+    }))
+    monkeypatch.setattr(router, "ROUTES_CONFIG_PATH", cfg)
+
+    info = get_routes_info()
+    assert "Agent swarm:" in info
+    assert "local_review_diff review dimensions" in info
+    assert "security -> deepseek-coder" in info
+    assert "local_consensus consensus candidates: gemma4-32k, llama3.1" in info
