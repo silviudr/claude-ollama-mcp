@@ -433,7 +433,7 @@ def get_routes_info() -> str:
             "",
             "Agent swarm: disabled (swarm.enabled = false)",
             "  Configured but inactive — local_review_diff makes a single call,",
-            "  local_consensus reports no candidates. Set swarm.enabled to true.",
+            "  local_consensus reports swarms are disabled. Set swarm.enabled to true.",
         ]
     elif swarm.review_dimensions or swarm.consensus_candidates:
         caps = get_swarm_concurrency()

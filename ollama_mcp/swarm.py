@@ -23,7 +23,7 @@ _FALLBACK_CAP = 4
 # instance — Backend objects are rebuilt fresh on every router resolve, so a
 # per-instance semaphore would let concurrent tool calls each get their own
 # cap and collectively exceed it. Module-level so the cap holds process-wide.
-_semaphores: dict[str, asyncio.Semaphore] = {}
+_semaphores: dict[str, tuple[int, asyncio.Semaphore]] = {}
 
 
 @dataclass
@@ -128,11 +128,21 @@ async def run_swarm(
     caps = concurrency or DEFAULT_CONCURRENCY
     for task in tasks:
         name = task.backend.name
-        if name not in _semaphores:
-            limit = caps.get(name, DEFAULT_CONCURRENCY.get(name, _FALLBACK_CAP))
-            _semaphores[name] = asyncio.Semaphore(limit)
+        limit = caps.get(name, DEFAULT_CONCURRENCY.get(name, _FALLBACK_CAP))
+        existing = _semaphores.get(name)
+        # The stored limit is tracked so a routes.json cap change is picked up.
+        # Keying only on presence would freeze the cap at whatever the first
+        # call in this process used, which contradicts config being re-read per
+        # call. Tasks already holding the old semaphore finish under the old
+        # cap, so the two can briefly overlap right after a change — bounded by
+        # old + new rather than unbounded, and only for one in-flight batch.
+        if existing is None or existing[0] != limit:
+            _semaphores[name] = (limit, asyncio.Semaphore(limit))
 
-    coros = [_run_one(task, _semaphores[task.backend.name], tool_name) for task in tasks]
+    coros = [
+        _run_one(task, _semaphores[task.backend.name][1], tool_name)
+        for task in tasks
+    ]
     return await asyncio.gather(*coros)
 
 

@@ -240,6 +240,47 @@ async def test_concurrency_cap_is_global_across_run_swarm_calls():
     assert backend.max_active <= 1
 
 
+async def test_concurrency_cap_change_takes_effect_without_restart():
+    """routes.json is re-read per call, so a changed swarm.concurrency must
+    apply on the next call. Caching the semaphore on first sight of a backend
+    name froze the cap for the life of the process."""
+    backend = _FakeBackend(delay=0.05)
+
+    def tasks_for(n):
+        return [
+            SwarmTask(key=str(i), backend=backend, model=f"m{i}", prompt="p")
+            for i in range(n)
+        ]
+
+    await run_swarm(tasks_for(4), concurrency={"ollama": 1})
+    assert backend.max_active == 1
+
+    # Same process, same backend name, higher cap — must be honored.
+    backend.max_active = 0
+    await run_swarm(tasks_for(4), concurrency={"ollama": 3})
+    assert backend.max_active > 1, "cap change ignored — semaphore was cached"
+    assert backend.max_active <= 3
+
+    # And back down again.
+    backend.max_active = 0
+    await run_swarm(tasks_for(4), concurrency={"ollama": 1})
+    assert backend.max_active == 1
+
+
+async def test_unchanged_cap_reuses_same_semaphore():
+    """The cap only rebuilds when it actually changes — otherwise concurrent
+    calls would each get a fresh semaphore and collectively exceed the cap."""
+    from ollama_mcp import swarm
+
+    backend = _FakeBackend()
+    tasks = [SwarmTask(key="a", backend=backend, model="m", prompt="p")]
+
+    await run_swarm(tasks, concurrency={"ollama": 2})
+    first = swarm._semaphores["ollama"][1]
+    await run_swarm(tasks, concurrency={"ollama": 2})
+    assert swarm._semaphores["ollama"][1] is first
+
+
 async def test_failed_task_wall_ms_excludes_semaphore_queue_wait():
     backend = _FakeBackend()
 

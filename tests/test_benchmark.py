@@ -83,21 +83,29 @@ async def test_run_benchmark_handles_model_failure():
 
 @respx.mock
 async def test_run_benchmark_runs_concurrently():
-    delay = 0.2
+    """Asserts on observed overlap rather than elapsed time — a wall-clock
+    threshold flakes on a loaded CI runner even when the code is correctly
+    concurrent. Mirrors how test_swarm.py tracks max_active."""
+    in_flight = 0
+    max_in_flight = 0
 
     async def slow_response(request):
-        await asyncio.sleep(delay)
-        return _ollama_response("ok")
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        try:
+            await asyncio.sleep(0.05)
+            return _ollama_response("ok")
+        finally:
+            in_flight -= 1
 
     respx.post(API_URL).mock(side_effect=slow_response)
 
-    t0 = time.perf_counter()
     results = await run_benchmark("test", models=["m1", "m2"])
-    elapsed = time.perf_counter() - t0
 
     assert len(results) == 2
     assert all(r.success for r in results)
-    assert elapsed < delay * 1.8  # concurrent (~1x delay), not sequential (~2x)
+    assert max_in_flight > 1  # genuinely overlapped, not run back-to-back
 
 
 @respx.mock
