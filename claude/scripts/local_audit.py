@@ -5,11 +5,17 @@ Sweeps EVERY source file in a project through local Ollama models. Runs
 outside any LLM context window, so coverage does not degrade on large repos
 and cannot silently stop early.
 
-Refuses to run if the routing config exposes any non-Ollama backend.
+Refuses to run if any review dimension routes to a non-Ollama backend. A cloud
+backend merely being declared is reported but allowed, so a hybrid config can
+still audit locally; pass --strict to refuse on declaration alone.
 
 Usage:
     local_audit.py [PATH] [--out SECURITY-AUDIT.md] [--resume] [--limit N]
-                          [--chunk-lines 350] [--concurrency 2] [--include-tests]
+                          [--chunk-lines 350] [--concurrency 2] [--strict]
+                          [--include-tests] [--seed N] [--keep-alive 30m]
+
+Progress goes to stdout, flushed on every line: piped stdout (background runs,
+tee, CI) is fully buffered, so an unflushed line can sit invisible for minutes.
 """
 
 from __future__ import annotations
@@ -54,6 +60,9 @@ EXCLUDE_FILES = {
 }
 
 MAX_BYTES = 400_000  # skip anything bigger; almost certainly generated
+
+# Emit a progress line at least this often, even when calls are slow.
+HEARTBEAT_S = 60
 
 # Ordering only — everything still gets audited, this just front-loads risk.
 HOT = (
@@ -554,8 +563,9 @@ def main() -> int:
         sys.exit(f"FATAL: {root} does not exist")
 
     url, dims, remote = load_config(strict=a.strict)
-    print(f"[cfg] local-only verified — every model below is on {url}")
-    print("[cfg] dimensions: " + ", ".join(f"{d}={m}" for d, m in dims.items()))
+    print(f"[cfg] local-only verified — every model below is on {url}", flush=True)
+    print("[cfg] dimensions: " + ", ".join(f"{d}={m}" for d, m in dims.items()),
+          flush=True)
     if remote:
         print(
             f"[cfg] note: {', '.join(remote)} backend(s) are declared in "
@@ -578,11 +588,13 @@ def main() -> int:
                 jobs.append((rel, lo, hi, body, dim))
 
     n_chunks = len({(j[0], j[1]) for j in jobs})
-    print(f"[plan] {len(files)} files -> {n_chunks} chunks -> {len(jobs)} model calls")
+    print(f"[plan] {len(files)} files -> {n_chunks} chunks -> {len(jobs)} model calls",
+          flush=True)
     # ~21s per call measured against warm 30B-class models. Yours will differ;
     # the live ETA below replaces this estimate once calls start completing.
     est = len(jobs) * 21 / max(a.concurrency, 1) / 60
-    print(f"[plan] rough estimate: {est:.0f} min at concurrency {a.concurrency}")
+    print(f"[plan] rough estimate: {est:.0f} min at concurrency {a.concurrency}",
+          flush=True)
     if a.dry_run:
         for p in files[:40]:
             print("   ", p.relative_to(root))
@@ -604,11 +616,11 @@ def main() -> int:
             findings.extend(rec.get("findings", []))
             if rec.get("error"):
                 failed.append(rec["failinfo"])
-        print(f"[resume] skipping {len(done)} completed calls")
+        print(f"[resume] skipping {len(done)} completed calls", flush=True)
 
     jobs = [j for j in jobs if f"{j[0]}:{j[1]}:{j[4]}" not in done]
     if not jobs:
-        print("[done] nothing left to do")
+        print("[done] nothing left to do", flush=True)
 
     # Load every model before timing starts. A model's first response after
     # load can differ from its later ones even under a fixed seed, so
@@ -625,6 +637,7 @@ def main() -> int:
             print(f"[warmup] {model}: {state} ({time.time() - t_w:.0f}s)", flush=True)
 
     t0 = time.time()
+    last_report = [t0]  # list so the worker closure can rebind it
     completed = 0
     total = len(jobs)
     lock = threading.Lock()
@@ -653,8 +666,17 @@ def main() -> int:
             findings.extend(fs)
             fh.write(json.dumps(rec) + "\n")
             fh.flush()
-            if completed % 10 == 0 or completed == total:
-                el = time.time() - t0
+            now = time.time()
+            # Time-based fallback alongside the call count. Ten calls can be
+            # several minutes apart on a slow model or with large chunks, and
+            # a long silence is indistinguishable from a hang.
+            if (
+                completed % 10 == 0
+                or completed == total
+                or now - last_report[0] >= HEARTBEAT_S
+            ):
+                last_report[0] = now
+                el = now - t0
                 rate = completed / max(el, 1)
                 eta = (total - completed) / max(rate, 1e-6) / 60
                 print(
@@ -679,8 +701,8 @@ def main() -> int:
     out.write_text(build_report(root, findings, stats, dims))
     (root / ".local-audit-findings.json").write_text(json.dumps(findings, indent=2))
 
-    print(f"\n[done] {len(findings)} raw findings -> {out}")
-    print(f"[done] {len(failed)} failed calls")
+    print(f"\n[done] {len(findings)} raw findings -> {out}", flush=True)
+    print(f"[done] {len(failed)} failed calls", flush=True)
     if not failed and total:
         ckpt.unlink(missing_ok=True)
     return 0
