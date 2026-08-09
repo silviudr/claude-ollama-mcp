@@ -5,3 +5,9 @@ venv/
 .env
 *.jsonl
 .claude/
+
+# Artifacts from claude/scripts/local_audit.py. The checkpoint is already
+# covered by *.jsonl; the raw findings dump is machine output, not a document.
+# SECURITY-AUDIT.md is deliberately NOT ignored — commit it if you want the
+# report reviewed.
+.local-audit-findings.json

@@ -1,0 +1,84 @@
+{
+  "_comment": [
+    "LOCAL ONLY — nothing here can reach a cloud provider.",
+    "The openrouter backend is deliberately ABSENT rather than merely unrouted:",
+    "the router resolves backends by name, so with none defined there is nothing",
+    "for a stray 'openrouter/...' candidate to resolve to, and claude/scripts/",
+    "local_audit.py hard-refuses to run if it finds a non-ollama backend here.",
+    "",
+    "Replace every model name below with tags you actually have installed.",
+    "Run `python3 ~/.claude/scripts/probe_models.py` first — it tests your models",
+    "and prints a snippet naming the ones that work. A wrong tag fails at call",
+    "time with a 404, not at startup."
+  ],
+
+  "default_backend": "ollama",
+  "backends": {
+    "ollama": {
+      "url": "http://localhost:11434",
+      "default_model": "REPLACE-ME:general-purpose-model"
+    }
+  },
+
+  "routes": {
+    "local_summarize": "REPLACE-ME:general-purpose-model",
+    "local_draft_boilerplate": "REPLACE-ME:coding-model",
+    "local_implement_small": "REPLACE-ME:coding-model",
+    "local_commit_message": "REPLACE-ME:small-fast-model",
+    "local_review_diff": "REPLACE-ME:coding-model",
+    "local_generate_tests": "REPLACE-ME:coding-model",
+    "local_classify_task": "REPLACE-ME:small-fast-model",
+    "local_analyze_data": "REPLACE-ME:general-purpose-model"
+  },
+
+  "grading": {
+    "_comment": "Grading is real GPU work now, not a free cloud tier. Every graded call costs a second inference, so sample rather than grading everything.",
+    "enabled": true,
+    "backend": "ollama",
+    "model": "REPLACE-ME:general-purpose-model",
+    "sample_rate": 0.1,
+    "tool_sample_rates": {
+      "local_review_diff": 0.1,
+      "local_implement_small": 0.25,
+      "local_generate_tests": 0.25
+    }
+  },
+
+  "swarm": {
+    "_comment": "review_dimensions drives both local_review_diff and the /local-audit sweeper. Two DIFFERENT models matter more than two strong ones: uncorrelated mistakes are what makes agreement meaningful. concurrency.ollama should match OLLAMA_NUM_PARALLEL on the server.",
+    "enabled": true,
+    "concurrency": { "ollama": 2 },
+    "review_dimensions": {
+      "local_review_diff": {
+        "security": "REPLACE-ME:reasoning-model",
+        "correctness": "REPLACE-ME:coding-model"
+      }
+    },
+    "consensus_candidates": {
+      "local_consensus": [
+        "REPLACE-ME:coding-model",
+        "REPLACE-ME:reasoning-model",
+        "REPLACE-ME:general-purpose-model"
+      ]
+    }
+  },
+
+  "adaptive": {
+    "_comment": "Scores are keyed by model NAME. Renaming or replacing a model orphans its history and each new candidate restarts from zero samples.",
+    "enabled": true,
+    "min_samples": 10,
+    "quality_weight": 0.7,
+    "explore_rate": 0.1,
+    "recency_window": 100,
+    "candidates": {
+      "local_summarize": [
+        "REPLACE-ME:general-purpose-model",
+        "REPLACE-ME:coding-model"
+      ],
+      "local_review_diff": [
+        "REPLACE-ME:coding-model",
+        "REPLACE-ME:reasoning-model"
+      ]
+    }
+  }
+}

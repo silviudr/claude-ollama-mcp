@@ -47,10 +47,20 @@ claude-ollama-mcp/
 │   ├── storage.py        # SQLite telemetry, cost tracking, and grading storage
 │   ├── telemetry.py      # JSON-lines logging, observed() decorator
 │   └── tools.py          # MCP tool definitions
-├── tests/                # pytest suite (334 tests)
+├── claude/               # installs into ~/.claude (see Local-only security audit)
+│   ├── install.sh        # copies command + scripts into ~/.claude
+│   ├── commands/
+│   │   └── local-audit.md    # the /local-audit slash command
+│   └── scripts/          # stdlib-only: run on bare python3, no install
+│       ├── local_audit.py    # whole-repo sweeper, runs outside any context
+│       └── probe_models.py   # tests YOUR models for audit suitability
+├── docs/
+│   └── local-model-findings.md  # measured local-model behaviour + gotchas
+├── tests/                # pytest suite (437 tests)
 ├── pyproject.toml        # packaging (pip installable)
 ├── requirements.txt      # mcp[cli], httpx
 ├── examples/             # toy project built entirely via local delegation
+│   ├── configs/          # ready-to-edit routes.json templates
 │   └── textkit/          # pure-function text utilities (see Example project)
 ├── .github/workflows/    # CI runs tests on PRs
 ├── .gitignore
@@ -78,6 +88,11 @@ claude-ollama-mcp/
 
 Each tool's docstring is what Claude sees. Iterate on the docstrings — that
 is the tuning loop, not the code.
+
+Alongside these, `claude/` ships a `/local-audit` slash command that sweeps an
+entire repository through your local models. It is not an MCP tool — it runs
+outside the context window precisely so that repo size cannot degrade coverage.
+See [Local-only security audit](#local-only-security-audit).
 
 ## Building a 32K context Gemma model
 
@@ -1066,6 +1081,116 @@ therefore accumulates no adaptive data, and any `adaptive.candidates` entry
 for it will sit at "no data yet" indefinitely. The two features work, but not
 on the same tool at the same time — which is consistent with swarm config
 taking precedence over adaptive.
+
+
+## Local-only security audit
+
+`local_review_diff` reviews one diff. Auditing a *whole repository* is a
+different problem: 300+ files will not fit in Claude's context, and an
+LLM driving the loop tends to run out of room and stop after the "important"
+files without saying so.
+
+`claude/` solves that with a standalone sweeper plus a `/local-audit` slash
+command. The sweeper walks every source file and talks to Ollama directly, so
+it runs **outside any context window** — coverage does not degrade with repo
+size, and it cannot quietly stop early. Claude only launches it and interprets
+the report.
+
+It reads `swarm.review_dimensions` from the same `routes.json` described in
+[Agent swarm](#agent-swarm), so its models are configured exactly like
+everything else.
+
+### Setup
+
+**1. Install the command and scripts**
+
+```bash
+./claude/install.sh          # or: CLAUDE_DIR=/custom/path ./claude/install.sh
+```
+
+This copies into `~/.claude/`:
+
+| File | Purpose |
+| ---- | ------- |
+| `commands/local-audit.md` | the `/local-audit` slash command |
+| `scripts/local_audit.py` | the sweeper |
+| `scripts/probe_models.py` | model capability prober |
+
+Both scripts are **stdlib-only** — they deliberately do not import
+`ollama_mcp`, so they run on a bare system `python3` with nothing installed.
+
+**2. Create a routing config**
+
+```bash
+mkdir -p ~/.config/ollama_mcp
+cp examples/configs/routes.local-only.json ~/.config/ollama_mcp/routes.json
+```
+
+Then edit `url` and replace every `REPLACE-ME:` placeholder with tags you
+actually have. A wrong tag fails at call time with a 404, not at startup.
+
+The example has **no `openrouter` backend at all**. That is deliberate and load
+bearing: the router resolves backends by name, so with none defined there is
+nothing a stray `openrouter/...` candidate can resolve to. The sweeper also
+hard-refuses to start if it finds a non-Ollama backend, so "local only" is
+enforced in two independent places rather than being something you must
+remember to ask for.
+
+**3. Find out which of your models actually work**
+
+```bash
+python3 ~/.claude/scripts/probe_models.py
+```
+
+**Do not skip this.** Model behaviour varies enormously and fails *silently*.
+On the machine this was developed against, four of six models returned an empty
+string under Ollama's JSON-schema mode — and an empty response parses as "no
+findings", so a completely broken security scan looks exactly like a clean
+result. The prober plants three known defects, checks each model finds them,
+tests whether output is reproducible, and prints a `routes.json` snippet naming
+the models that passed.
+
+Prefer **two different models** for the two dimensions. Their mistakes are less
+correlated, which is what makes agreement between them meaningful.
+
+**4. Restart Claude Code** so `/local-audit` is picked up, then run it in any
+repository:
+
+```
+/local-audit              # whole repo
+/local-audit src/api      # or one subdirectory
+```
+
+Or skip Claude entirely:
+
+```bash
+python3 ~/.claude/scripts/local_audit.py . --resume
+```
+
+### What it produces
+
+`SECURITY-AUDIT.md` plus `.local-audit-findings.json` (raw, per-dimension).
+Findings confirmed independently by both dimensions are tagged
+`CONFIRMED BY BOTH` — the strongest signal available locally. Chunks whose
+output could not be parsed are listed under **NOT AUDITED**; an unparseable
+response is never counted as clean.
+
+Useful flags: `--resume` (continue from checkpoint — safe to always pass),
+`--limit N`, `--include-tests`, `--concurrency`, `--chunk-lines`,
+`--seed`, `--dry-run`.
+
+### Read this before trusting the output
+
+These are unverified ~30B model outputs. In validation the pipeline found 7 of
+8 planted vulnerabilities, but it also reported a confident HIGH "SQL
+injection" on a correctly parameterized query, and it has never once detected a
+timing-unsafe comparison. Treat the report as triage: open the cited line and
+confirm before acting. Pinning the seed makes findings reproducible, not
+correct.
+
+Full measurements — schema-mode failures, determinism, VRAM, and why
+cross-model agreement beats multi-pass voting — are in
+[docs/local-model-findings.md](docs/local-model-findings.md).
 
 
 ## Privacy intercept
