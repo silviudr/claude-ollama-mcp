@@ -47,10 +47,20 @@ claude-ollama-mcp/
 │   ├── storage.py        # SQLite telemetry, cost tracking, and grading storage
 │   ├── telemetry.py      # JSON-lines logging, observed() decorator
 │   └── tools.py          # MCP tool definitions
-├── tests/                # pytest suite (334 tests)
+├── claude/               # installs into ~/.claude (see Local-only security audit)
+│   ├── install.sh        # copies command + scripts into ~/.claude
+│   ├── commands/
+│   │   └── local-audit.md    # the /local-audit slash command
+│   └── scripts/          # stdlib-only: run on bare python3, no install
+│       ├── local_audit.py    # whole-repo sweeper, runs outside any context
+│       └── probe_models.py   # tests YOUR models for audit suitability
+├── docs/
+│   └── local-model-findings.md  # measured local-model behaviour + gotchas
+├── tests/                # pytest suite (437 tests)
 ├── pyproject.toml        # packaging (pip installable)
 ├── requirements.txt      # mcp[cli], httpx
 ├── examples/             # toy project built entirely via local delegation
+│   ├── configs/          # ready-to-edit routes.json templates
 │   └── textkit/          # pure-function text utilities (see Example project)
 ├── .github/workflows/    # CI runs tests on PRs
 ├── .gitignore
@@ -78,6 +88,11 @@ claude-ollama-mcp/
 
 Each tool's docstring is what Claude sees. Iterate on the docstrings — that
 is the tuning loop, not the code.
+
+Alongside these, `claude/` ships a `/local-audit` slash command that sweeps an
+entire repository through your local models. It is not an MCP tool — it runs
+outside the context window precisely so that repo size cannot degrade coverage.
+See [Local-only security audit](#local-only-security-audit).
 
 ## Building a 32K context Gemma model
 
@@ -1068,6 +1083,163 @@ on the same tool at the same time — which is consistent with swarm config
 taking precedence over adaptive.
 
 
+## Local-only security audit
+
+`local_review_diff` reviews one diff. Auditing a *whole repository* is a
+different problem: 300+ files will not fit in Claude's context, and an
+LLM driving the loop tends to run out of room and stop after the "important"
+files without saying so.
+
+`claude/` solves that with a standalone sweeper plus a `/local-audit` slash
+command. The sweeper walks every source file and talks to Ollama directly, so
+it runs **outside any context window** — coverage does not degrade with repo
+size, and it cannot quietly stop early. Claude only launches it and interprets
+the report.
+
+It reads `swarm.review_dimensions` from the same `routes.json` described in
+[Agent swarm](#agent-swarm), so its models are configured exactly like
+everything else.
+
+### Setup
+
+**1. Install the command and scripts**
+
+```bash
+./claude/install.sh          # or: CLAUDE_DIR=/custom/path ./claude/install.sh
+```
+
+This copies into `~/.claude/`:
+
+| File | Purpose |
+| ---- | ------- |
+| `commands/local-audit.md` | the `/local-audit` slash command |
+| `scripts/local_audit.py` | the sweeper |
+| `scripts/probe_models.py` | model capability prober |
+
+Both scripts are **stdlib-only** — they deliberately do not import
+`ollama_mcp`, so they run on a bare system `python3` with nothing installed.
+
+**2. Create a routing config**
+
+```bash
+mkdir -p ~/.config/ollama_mcp
+cp examples/configs/routes.local-only.json ~/.config/ollama_mcp/routes.json
+```
+
+Then edit `url` and replace every `REPLACE-ME:` placeholder with tags you
+actually have. A wrong tag fails at call time with a 404, not at startup.
+
+The example has **no `openrouter` backend at all**. That is deliberate and load
+bearing: the router resolves backends by name, so with none defined there is
+nothing a stray `openrouter/...` candidate can resolve to. The sweeper also
+hard-refuses to start if it finds a non-Ollama backend, so "local only" is
+enforced in two independent places rather than being something you must
+remember to ask for.
+
+**3. Find out which of your models actually work**
+
+```bash
+python3 ~/.claude/scripts/probe_models.py
+```
+
+**Do not skip this.** Model behaviour varies enormously and fails *silently*.
+On the machine this was developed against, four of six models returned an empty
+string under Ollama's JSON-schema mode — and an empty response parses as "no
+findings", so a completely broken security scan looks exactly like a clean
+result. The prober plants three known defects, checks each model finds them,
+tests whether output is reproducible, and prints a `routes.json` snippet naming
+the models that passed.
+
+Prefer **two different models** for the two dimensions. Their mistakes are less
+correlated, which is what makes agreement between them meaningful.
+
+**4. Restart Claude Code** so `/local-audit` is picked up, then run it in any
+repository:
+
+```
+/local-audit              # whole repo
+/local-audit src/api      # or one subdirectory
+```
+
+Or skip Claude entirely:
+
+```bash
+python3 ~/.claude/scripts/local_audit.py . --resume
+```
+
+### What it produces
+
+`SECURITY-AUDIT.md` plus `.local-audit-findings.json` (raw, per-dimension).
+Findings confirmed independently by both dimensions are tagged
+`CONFIRMED BY BOTH` — the strongest signal available locally. Chunks whose
+output could not be parsed are listed under **NOT AUDITED**; an unparseable
+response is never counted as clean.
+
+Useful flags: `--resume` (continue from checkpoint — safe to always pass),
+`--limit N`, `--include-tests`, `--concurrency`, `--chunk-lines`,
+`--seed`, `--dry-run`.
+
+### Using OpenRouter alongside it
+
+Wanting cloud models for everyday tools does not force you to give up local
+audits. Start from [`examples/configs/routes.hybrid.json`](examples/configs/routes.hybrid.json),
+which routes `local_summarize` and `local_analyze_data` to OpenRouter while
+keeping the audit dimensions local.
+
+Three things to get right:
+
+**Use `api_key_env`, not `api_key`.** The object form stores your key in
+plaintext in `routes.json`, where it travels into every backup and every
+`cat` of that file. `{"api_key_env": "OPENROUTER_API_KEY"}` reads it from the
+environment instead.
+
+**Set `grading.backend` explicitly.** It defaults to `openrouter` when the key
+is absent — so the moment an OpenRouter backend exists, an unset grading
+backend quietly starts sending graded inputs and outputs to the cloud. Say
+`"backend": "ollama"` if you want it local.
+
+**Keep `swarm.review_dimensions` local.** The audit refuses to start if a
+dimension is prefixed `openrouter/`. Merely *declaring* a cloud backend is
+fine — the sweeper checks the models it will actually send code to, prints a
+note that unused remote backends exist, and continues. Pass `--strict` if you
+would rather it refuse whenever a remote backend is declared at all.
+
+Worth knowing: `local_audit.py` imports nothing from `ollama_mcp` and POSTs
+only to `backends.ollama.url`, so it has no code path to a cloud host
+whatever the config says. The checks exist to catch a config that *intends*
+something you did not mean, not to contain a runtime capability.
+
+To keep both worlds one command apart, hold two files and switch with the
+env var the whole project already honours:
+
+```bash
+cp examples/configs/routes.hybrid.json     ~/.config/ollama_mcp/routes.hybrid.json
+cp examples/configs/routes.local-only.json ~/.config/ollama_mcp/routes.json
+
+# one-off audit under a different config
+OLLAMA_MCP_ROUTES=~/.config/ollama_mcp/routes.hybrid.json \
+  python3 ~/.claude/scripts/local_audit.py .
+```
+
+Note this only redirects the sweeper and any process you launch with it. The
+MCP server reads the path fixed at spawn time, so switching *its* config means
+editing `~/.config/ollama_mcp/routes.json` in place — which needs no restart,
+since the router re-reads it on every call.
+
+### Read this before trusting the output
+
+These are unverified ~30B model outputs. In validation the pipeline found 7 of
+8 planted vulnerabilities, but it also reported a confident HIGH "SQL
+injection" on a correctly parameterized query, and it has never once detected a
+timing-unsafe comparison. Treat the report as triage: open the cited line and
+confirm before acting. Pinning the seed makes findings reproducible, not
+correct.
+
+Full measurements — schema-mode failures, determinism, VRAM, and why
+cross-model agreement beats multi-pass voting — are in
+[docs/local-model-findings.md](docs/local-model-findings.md).
+
+
 ## Privacy intercept
 
 Every tool input is scanned for sensitive content before processing. The
@@ -1366,6 +1538,17 @@ mechanical tasks, thorough models for review and test generation.
 - **Decorator order matters.** `@mcp.tool()` outermost, `@observed(...)`
   innermost, `@privacy_guard` between them. `functools.wraps` preserves
   the signature so FastMCP's schema introspection still works.
+- **`grading.backend` defaults to `openrouter`, not to your default backend.**
+  A `grading` block that omits `"backend"` sends every graded tool input and
+  output to the cloud, even when every route is local. If you want local
+  grading, say `"backend": "ollama"` explicitly. This is the easiest way to
+  leak code off-machine while believing you are running locally.
+- **Adaptive scores are keyed by model name.** Renaming or replacing a model
+  orphans its history; each new candidate restarts at zero samples and sits at
+  "no data yet" until it reaches `min_samples`. Nothing warns you.
+- **`routes.json` is re-read on every tool call**, so config edits apply with
+  no restart. Environment variables in the MCP registration are the exception —
+  those are fixed when the server process spawns.
 
 ## Debugging
 

@@ -1,0 +1,69 @@
+{
+  "_comment": [
+    "HYBRID — OpenRouter for everyday tools, local models for the audit.",
+    "",
+    "Read the grading block before using this. grading.backend defaults to",
+    "'openrouter' when the key is ABSENT, so omitting it silently ships every",
+    "graded tool input and output to the cloud. It is set explicitly below.",
+    "",
+    "The /local-audit sweeper still runs: it checks that its own review",
+    "dimensions are local, not that your config is free of cloud backends. Pass",
+    "--strict if you want it to refuse whenever a remote backend is declared at",
+    "all. Note the sweeper talks only to backends.ollama.url regardless — it",
+    "imports nothing from ollama_mcp and has no code path to a cloud host."
+  ],
+
+  "default_backend": "ollama",
+  "backends": {
+    "ollama": {
+      "url": "http://localhost:11434",
+      "default_model": "REPLACE-ME:general-purpose-model"
+    },
+    "openrouter": {
+      "_comment": "api_key_env keeps the secret out of this file. Prefer it over api_key, which stores the key in plaintext and travels into every backup you take.",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "default_model": "google/gemma-3-27b-it"
+    }
+  },
+
+  "routes": {
+    "_comment": "A bare string uses default_backend. Use the object form to send one tool elsewhere.",
+    "local_summarize": { "backend": "openrouter", "model": "google/gemma-3-27b-it" },
+    "local_analyze_data": { "backend": "openrouter", "model": "google/gemma-3-27b-it" },
+
+    "local_implement_small": "REPLACE-ME:coding-model",
+    "local_draft_boilerplate": "REPLACE-ME:coding-model",
+    "local_review_diff": "REPLACE-ME:coding-model",
+    "local_generate_tests": "REPLACE-ME:coding-model",
+    "local_commit_message": "REPLACE-ME:small-fast-model",
+    "local_classify_task": "REPLACE-ME:small-fast-model"
+  },
+
+  "grading": {
+    "_comment": "MUST be set explicitly. Absent 'backend' means openrouter, which sends graded inputs and outputs off-machine.",
+    "enabled": true,
+    "backend": "ollama",
+    "model": "REPLACE-ME:general-purpose-model",
+    "sample_rate": 0.1
+  },
+
+  "swarm": {
+    "_comment": "Kept fully local so /local-audit runs. Prefixing a dimension with 'openrouter/' makes the sweeper refuse.",
+    "enabled": true,
+    "concurrency": { "ollama": 2, "openrouter": 8 },
+    "review_dimensions": {
+      "local_review_diff": {
+        "security": "REPLACE-ME:reasoning-model",
+        "correctness": "REPLACE-ME:coding-model"
+      }
+    },
+    "consensus_candidates": {
+      "_comment": "Consensus is a fine place to mix cloud and local — disagreement between a cloud and a local model is informative. This is separate from the audit.",
+      "local_consensus": [
+        "REPLACE-ME:coding-model",
+        "REPLACE-ME:reasoning-model",
+        "openrouter/google/gemma-3-27b-it"
+      ]
+    }
+  }
+}
