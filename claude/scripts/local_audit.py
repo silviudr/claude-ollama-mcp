@@ -165,20 +165,37 @@ def _salvage_objects(text: str) -> list[dict]:
 # ---------------------------------------------------------------- config
 
 
-def load_config() -> tuple[str, dict[str, str]]:
-    """Return (ollama_url, {dimension: model}). Hard-fails on cloud backends."""
+# Backend names this project can route to that are not the local Ollama
+# server. A dimension prefixed with one of these is a cloud route even when
+# the backend is not currently declared.
+REMOTE_BACKENDS = {"openrouter"}
+
+
+def load_config(strict: bool = False) -> tuple[str, dict[str, str], list[str]]:
+    """Return (ollama_url, {dimension: model}, unused_remote_backend_names).
+
+    The guarantee enforced here is "every model this run sends code to is
+    local", checked against the dimensions actually used — not "no cloud
+    backend is mentioned anywhere". Those differ, and the distinction matters:
+    plenty of people want OpenRouter for local_summarize while keeping audits
+    on-premises, and this script cannot reach a cloud host anyway (it POSTs
+    only to backends.ollama.url and imports nothing from ollama_mcp).
+
+    `strict` restores the blunt check — refuse if a remote backend is so much
+    as declared — for anyone who wants the config itself to be evidence.
+    """
     if not ROUTES.exists():
         sys.exit(f"FATAL: no routing config at {ROUTES}")
 
     cfg = json.loads(ROUTES.read_text())
     backends = cfg.get("backends", {})
 
-    foreign = [n for n in backends if n != "ollama"]
-    if foreign:
+    remote = sorted(n for n in backends if n != "ollama")
+    if remote and strict:
         sys.exit(
-            "FATAL: refusing to run — non-local backend(s) configured: "
-            f"{', '.join(foreign)}.\nThis audit is local-only by contract. "
-            f"Remove them from {ROUTES}."
+            "FATAL: --strict and remote backend(s) declared: "
+            f"{', '.join(remote)}.\nRemove them from {ROUTES}, or drop "
+            "--strict to check the audit's own models instead."
         )
 
     url = backends.get("ollama", {}).get("url", "http://localhost:11434")
@@ -193,11 +210,21 @@ def load_config() -> tuple[str, dict[str, str]]:
             sys.exit("FATAL: no review dimensions and no default model configured.")
         dims = {"security": default_model}
 
-    for dim, model in dims.items():
-        if "/" in model:
-            sys.exit(f"FATAL: dimension '{dim}' uses non-local model '{model}'.")
+    # Match only a backend-name prefix. A bare "/" means nothing on its own —
+    # Ollama tags pulled from HuggingFace legitimately contain slashes, e.g.
+    # hf.co/bartowski/Some-Model-GGUF:Q4_K_M, and rejecting those would be
+    # wrong.
+    routable_remote = (set(backends) | REMOTE_BACKENDS) - {"ollama"}
+    for dim, model in sorted(dims.items()):
+        prefix = model.split("/", 1)[0]
+        if prefix in routable_remote:
+            sys.exit(
+                f"FATAL: refusing to run — dimension '{dim}' routes to the "
+                f"remote backend '{prefix}' ({model}).\nThis audit is "
+                f"local-only by contract. Point it at a local model in {ROUTES}."
+            )
 
-    return url.rstrip("/"), dims
+    return url.rstrip("/"), dims, remote
 
 
 # ---------------------------------------------------------------- files
@@ -516,6 +543,8 @@ def main() -> int:
                     help="decoding seed; fixed by default so re-runs match")
     ap.add_argument("--limit", type=int, default=0, help="audit only first N files")
     ap.add_argument("--include-tests", action="store_true")
+    ap.add_argument("--strict", action="store_true",
+                    help="also refuse if a remote backend is merely declared")
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
@@ -524,9 +553,18 @@ def main() -> int:
     if not root.exists():
         sys.exit(f"FATAL: {root} does not exist")
 
-    url, dims = load_config()
-    print(f"[cfg] local-only verified — {url}")
-    print(f"[cfg] dimensions: " + ", ".join(f"{d}={m}" for d, m in dims.items()))
+    url, dims, remote = load_config(strict=a.strict)
+    print(f"[cfg] local-only verified — every model below is on {url}")
+    print("[cfg] dimensions: " + ", ".join(f"{d}={m}" for d, m in dims.items()))
+    if remote:
+        print(
+            f"[cfg] note: {', '.join(remote)} backend(s) are declared in "
+            f"{ROUTES.name} but this\n"
+            "      audit does not use them. They still apply to the MCP "
+            "server's own tools —\n"
+            "      check grading.backend there, which defaults to openrouter "
+            "when unset."
+        )
 
     files = discover(root, a.include_tests)
     if a.limit:

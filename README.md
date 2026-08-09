@@ -1179,6 +1179,53 @@ Useful flags: `--resume` (continue from checkpoint — safe to always pass),
 `--limit N`, `--include-tests`, `--concurrency`, `--chunk-lines`,
 `--seed`, `--dry-run`.
 
+### Using OpenRouter alongside it
+
+Wanting cloud models for everyday tools does not force you to give up local
+audits. Start from [`examples/configs/routes.hybrid.json`](examples/configs/routes.hybrid.json),
+which routes `local_summarize` and `local_analyze_data` to OpenRouter while
+keeping the audit dimensions local.
+
+Three things to get right:
+
+**Use `api_key_env`, not `api_key`.** The object form stores your key in
+plaintext in `routes.json`, where it travels into every backup and every
+`cat` of that file. `{"api_key_env": "OPENROUTER_API_KEY"}` reads it from the
+environment instead.
+
+**Set `grading.backend` explicitly.** It defaults to `openrouter` when the key
+is absent — so the moment an OpenRouter backend exists, an unset grading
+backend quietly starts sending graded inputs and outputs to the cloud. Say
+`"backend": "ollama"` if you want it local.
+
+**Keep `swarm.review_dimensions` local.** The audit refuses to start if a
+dimension is prefixed `openrouter/`. Merely *declaring* a cloud backend is
+fine — the sweeper checks the models it will actually send code to, prints a
+note that unused remote backends exist, and continues. Pass `--strict` if you
+would rather it refuse whenever a remote backend is declared at all.
+
+Worth knowing: `local_audit.py` imports nothing from `ollama_mcp` and POSTs
+only to `backends.ollama.url`, so it has no code path to a cloud host
+whatever the config says. The checks exist to catch a config that *intends*
+something you did not mean, not to contain a runtime capability.
+
+To keep both worlds one command apart, hold two files and switch with the
+env var the whole project already honours:
+
+```bash
+cp examples/configs/routes.hybrid.json     ~/.config/ollama_mcp/routes.hybrid.json
+cp examples/configs/routes.local-only.json ~/.config/ollama_mcp/routes.json
+
+# one-off audit under a different config
+OLLAMA_MCP_ROUTES=~/.config/ollama_mcp/routes.hybrid.json \
+  python3 ~/.claude/scripts/local_audit.py .
+```
+
+Note this only redirects the sweeper and any process you launch with it. The
+MCP server reads the path fixed at spawn time, so switching *its* config means
+editing `~/.config/ollama_mcp/routes.json` in place — which needs no restart,
+since the router re-reads it on every call.
+
 ### Read this before trusting the output
 
 These are unverified ~30B model outputs. In validation the pipeline found 7 of
@@ -1491,6 +1538,17 @@ mechanical tasks, thorough models for review and test generation.
 - **Decorator order matters.** `@mcp.tool()` outermost, `@observed(...)`
   innermost, `@privacy_guard` between them. `functools.wraps` preserves
   the signature so FastMCP's schema introspection still works.
+- **`grading.backend` defaults to `openrouter`, not to your default backend.**
+  A `grading` block that omits `"backend"` sends every graded tool input and
+  output to the cloud, even when every route is local. If you want local
+  grading, say `"backend": "ollama"` explicitly. This is the easiest way to
+  leak code off-machine while believing you are running locally.
+- **Adaptive scores are keyed by model name.** Renaming or replacing a model
+  orphans its history; each new candidate restarts at zero samples and sits at
+  "no data yet" until it reaches `min_samples`. Nothing warns you.
+- **`routes.json` is re-read on every tool call**, so config edits apply with
+  no restart. Environment variables in the MCP registration are the exception —
+  those are fixed when the server process spawns.
 
 ## Debugging
 

@@ -9,7 +9,11 @@
     "Replace every model name below with tags you actually have installed.",
     "Run `python3 ~/.claude/scripts/probe_models.py` first — it tests your models",
     "and prints a snippet naming the ones that work. A wrong tag fails at call",
-    "time with a 404, not at startup."
+    "time with a 404, not at startup.",
+    "",
+    "Want OpenRouter for everyday tools but local audits? Use routes.hybrid.json",
+    "instead — declaring a cloud backend does not stop /local-audit from running,",
+    "as long as swarm.review_dimensions stay local."
   ],
 
   "default_backend": "ollama",

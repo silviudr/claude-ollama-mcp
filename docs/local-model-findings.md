@@ -138,9 +138,21 @@ unit of compute. If you want more, add a third *dimension* on a third model for
 - **Removing a backend beats unrouting it.** The router resolves backends by
   name. With no `openrouter` entry defined, a stray `openrouter/...` candidate
   has nothing to resolve to and fails loudly instead of quietly billing you.
+- **`grading.backend` defaults to `openrouter`, not to your default backend.**
+  This is the easiest way to leak code off-machine while believing you are
+  local: every route can point at Ollama, but a `grading` block missing
+  `"backend"` sends graded inputs and outputs to the cloud. Set it explicitly.
+  Note this affects the MCP tools only — the sweeper never calls grading.
 - **Grading is no longer free.** On a cloud free tier, grading every call cost
   nothing. Locally it is a second inference per graded call, roughly doubling
   the cost of the tool being graded. Sample it.
+- **"No cloud backend defined" and "no cloud model used" are different
+  guarantees.** The first is easy to check and blocks legitimate hybrid setups;
+  the second is what actually matters. The sweeper enforces the second by
+  default and offers `--strict` for the first. Related: a `/` in a model name
+  does not imply a cloud route — Ollama tags pulled from HuggingFace look like
+  `hf.co/bartowski/Some-GGUF:Q4_K_M`, so match on a backend-name prefix rather
+  than on any slash.
 - **Check parallelism before assuming you need to configure it.** Two models
   stayed co-resident and same-model requests genuinely overlapped (708ms wall
   for two requests against a 2218ms serial baseline), so `OLLAMA_NUM_PARALLEL`

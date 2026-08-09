@@ -150,29 +150,70 @@ def _write_routes(tmp_path, monkeypatch, cfg):
     return p
 
 
-def test_load_config_refuses_cloud_backend(tmp_path, monkeypatch):
-    """The local-only guarantee is the whole point; it must fail loudly."""
-    _write_routes(tmp_path, monkeypatch, {
-        "backends": {
-            "ollama": {"url": "http://localhost:11434", "default_model": "m"},
-            "openrouter": {"api_key": "sk-x", "default_model": "a/b"},
-        }
-    })
+_HYBRID = {
+    "backends": {
+        "ollama": {"url": "http://localhost:11434", "default_model": "m"},
+        "openrouter": {"api_key_env": "K", "default_model": "a/b"},
+    },
+    "swarm": {"review_dimensions": {"local_review_diff": {"security": "local-m"}}},
+}
+
+
+def test_load_config_allows_unused_cloud_backend(tmp_path, monkeypatch):
+    """Wanting OpenRouter for local_summarize must not block local audits.
+
+    The guarantee is about the models this run sends code to, not about the
+    config being free of any mention of a cloud provider."""
+    _write_routes(tmp_path, monkeypatch, _HYBRID)
+    url, dims, remote = la.load_config()
+    assert dims == {"security": "local-m"}
+    assert remote == ["openrouter"], "an unused cloud backend must be reported"
+
+
+def test_load_config_strict_refuses_declared_cloud_backend(tmp_path, monkeypatch):
+    _write_routes(tmp_path, monkeypatch, _HYBRID)
+    with pytest.raises(SystemExit) as e:
+        la.load_config(strict=True)
+    assert "openrouter" in str(e.value)
+
+
+def test_load_config_refuses_dimension_routed_to_cloud(tmp_path, monkeypatch):
+    """This is the case that actually leaks code off the machine."""
+    cfg = dict(_HYBRID)
+    cfg["swarm"] = {"review_dimensions": {
+        "local_review_diff": {"security": "openrouter/vendor/model"}
+    }}
+    _write_routes(tmp_path, monkeypatch, cfg)
     with pytest.raises(SystemExit) as e:
         la.load_config()
     assert "openrouter" in str(e.value)
 
 
-def test_load_config_refuses_prefixed_model_in_dimension(tmp_path, monkeypatch):
+def test_load_config_refuses_cloud_prefix_even_if_backend_undeclared(
+    tmp_path, monkeypatch
+):
+    """Naming a provider the project can route to is intent enough to refuse."""
     _write_routes(tmp_path, monkeypatch, {
         "backends": {"ollama": {"url": "http://h:11434", "default_model": "m"}},
         "swarm": {"review_dimensions": {
             "local_review_diff": {"security": "openrouter/vendor/model"}
         }},
     })
-    with pytest.raises(SystemExit) as e:
+    with pytest.raises(SystemExit):
         la.load_config()
-    assert "non-local" in str(e.value)
+
+
+def test_load_config_accepts_slashed_ollama_tag(tmp_path, monkeypatch):
+    """Ollama tags pulled from HuggingFace contain slashes. Treating any '/'
+    as a cloud route would reject perfectly local models."""
+    _write_routes(tmp_path, monkeypatch, {
+        "backends": {"ollama": {"url": "http://h:11434", "default_model": "m"}},
+        "swarm": {"review_dimensions": {
+            "local_review_diff": {"security": "hf.co/bartowski/Some-GGUF:Q4_K_M"}
+        }},
+    })
+    _, dims, _ = la.load_config()
+    assert dims == {"security": "hf.co/bartowski/Some-GGUF:Q4_K_M"}
 
 
 def test_load_config_reads_dimensions(tmp_path, monkeypatch):
@@ -182,16 +223,17 @@ def test_load_config_reads_dimensions(tmp_path, monkeypatch):
             "local_review_diff": {"security": "sec-model", "correctness": "cor-model"}
         }},
     })
-    url, dims = la.load_config()
+    url, dims, remote = la.load_config()
     assert url == "http://h:11434"
     assert dims == {"security": "sec-model", "correctness": "cor-model"}
+    assert remote == []
 
 
 def test_load_config_falls_back_to_default_model(tmp_path, monkeypatch):
     _write_routes(tmp_path, monkeypatch, {
         "backends": {"ollama": {"url": "http://h:11434", "default_model": "gen"}}
     })
-    _, dims = la.load_config()
+    _, dims, _ = la.load_config()
     assert dims == {"security": "gen"}
 
 
@@ -203,7 +245,7 @@ def test_load_config_ignores_unknown_dimension_names(tmp_path, monkeypatch):
             "local_review_diff": {"security": "a", "performance": "b", "tests": "c"}
         }},
     })
-    _, dims = la.load_config()
+    _, dims, _ = la.load_config()
     assert dims == {"security": "a"}
 
 
